@@ -1,0 +1,5 @@
+# Local tooling state
+.gcloud/
+
+# Generated dataset exports
+exports/
