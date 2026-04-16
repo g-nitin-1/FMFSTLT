@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train and evaluate a Stage 2 Transformer stop-policy model."""
+"""Train and evaluate a paper-faithful Stage 2 Transformer stop-policy model."""
 
 from __future__ import annotations
 
@@ -53,13 +53,13 @@ DEFAULT_EVAL_SUBSETS = ("val", "test", "robustness")
 def parse_args() -> argparse.Namespace:
     root_dir = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(
-        description="Train a Transformer classifier for Stage 2 stop/continue decisions."
+        description="Train a paper-faithful Transformer classifier for Stage 2 stop/continue decisions."
     )
     parser.add_argument(
         "--input-root",
         type=Path,
         default=root_dir / "artifacts_exact_public" / "stage2_transformer_dataset",
-        help="Root directory containing materialized Stage 2 transformer dataset shards.",
+        help="Root directory containing materialized Stage 2 Transformer dataset shards.",
     )
     parser.add_argument(
         "--output-root",
@@ -103,20 +103,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=2048,
-        help="Mini-batch size.",
+        default=4096,
+        help="Mini-batch size. Paper default: 4096.",
     )
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=3e-4,
-        help="AdamW learning rate.",
+        default=1e-3,
+        help="Adam learning rate. Paper default: 1e-3.",
     )
     parser.add_argument(
         "--weight-decay",
         type=float,
-        default=1e-4,
-        help="AdamW weight decay.",
+        default=0.0,
+        help="Weight decay. Left at 0 by default when using Adam.",
     )
     parser.add_argument(
         "--d-model",
@@ -127,19 +127,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-heads",
         type=int,
-        default=4,
-        help="Transformer attention heads.",
+        default=8,
+        help="Transformer attention heads. Paper default: 8.",
     )
     parser.add_argument(
         "--num-layers",
         type=int,
-        default=2,
-        help="Number of Transformer encoder layers.",
+        default=8,
+        help="Number of Transformer encoder layers. Paper default: 8.",
     )
     parser.add_argument(
         "--ff-dim",
         type=int,
-        default=256,
+        default=512,
         help="Transformer feed-forward dimension.",
     )
     parser.add_argument(
@@ -261,12 +261,17 @@ def read_dataset_summary(input_root: Path) -> dict[str, object] | None:
     return json.loads(summary_path.read_text())
 
 
-def infer_shape_from_first_shard(paths: list[Path]) -> tuple[int, int]:
+def infer_shape_from_first_shard(paths: list[Path]) -> tuple[int, int, int]:
     with np.load(paths[0], allow_pickle=False) as data:
-        x = data["x"]
-        if x.ndim != 3:
-            raise ValueError(f"expected tensor input rank 3 in {paths[0]}, got {x.ndim}")
-        return int(x.shape[1]), int(x.shape[2])
+        x_full = data["x_full"]
+        decision_valid_mask = data["decision_valid_mask"]
+        if x_full.ndim != 3:
+            raise ValueError(f"expected x_full rank 3 in {paths[0]}, got {x_full.ndim}")
+        if decision_valid_mask.ndim != 2:
+            raise ValueError(
+                f"expected decision_valid_mask rank 2 in {paths[0]}, got {decision_valid_mask.ndim}"
+            )
+        return int(x_full.shape[1]), int(x_full.shape[2]), int(decision_valid_mask.shape[1])
 
 
 def compute_pos_weight(
@@ -275,16 +280,15 @@ def compute_pos_weight(
 ) -> float:
     if args.pos_weight is not None:
         return float(args.pos_weight)
-
     if dataset_summary is None:
         raise ValueError("--pos-weight must be set when stage2_dataset_summary.json is missing")
 
     subset_summary = dataset_summary["subsets"][args.train_subset]
+    total = int(subset_summary["decisions"])
     if args.target_field == "stop_label":
-        positive = int(subset_summary["stop_positive_windows"])
+        positive = int(subset_summary["stop_positive_decisions"])
     else:
-        positive = int(subset_summary["oracle_stop_windows"])
-    total = int(subset_summary["windows"])
+        positive = int(subset_summary["oracle_stop_decisions"])
     negative = total - positive
     if positive <= 0 or negative <= 0:
         raise ValueError(
@@ -369,14 +373,14 @@ def threshold_metric_value(metric_name: str, labels: np.ndarray, probabilities: 
 
 def choose_threshold(args: argparse.Namespace, labels: np.ndarray, probabilities: np.ndarray) -> tuple[float, float]:
     if args.decision_threshold is not None:
-        return float(args.decision_threshold), threshold_metric_value(
-            args.threshold_metric, labels, probabilities, float(args.decision_threshold)
-        )
+        threshold = float(args.decision_threshold)
+        return threshold, threshold_metric_value(args.threshold_metric, labels, probabilities, threshold)
 
-    if args.threshold_steps <= 1:
-        candidates = np.array([0.5], dtype=np.float64)
-    else:
-        candidates = np.linspace(args.threshold_min, args.threshold_max, args.threshold_steps, dtype=np.float64)
+    candidates = (
+        np.array([0.5], dtype=np.float64)
+        if args.threshold_steps <= 1
+        else np.linspace(args.threshold_min, args.threshold_max, args.threshold_steps, dtype=np.float64)
+    )
 
     best_threshold = float(candidates[0])
     best_score = float("-inf")
@@ -393,7 +397,7 @@ class Stage2Transformer(nn.Module):
         self,
         *,
         input_dim: int,
-        window_size_buckets: int,
+        max_sequence_buckets: int,
         d_model: int,
         num_heads: int,
         num_layers: int,
@@ -402,7 +406,7 @@ class Stage2Transformer(nn.Module):
     ) -> None:
         super().__init__()
         self.input_projection = nn.Linear(input_dim, d_model)
-        self.position_embedding = nn.Parameter(torch.zeros(1, window_size_buckets, d_model))
+        self.position_embedding = nn.Parameter(torch.zeros(1, max_sequence_buckets, d_model))
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=num_heads,
@@ -421,15 +425,23 @@ class Stage2Transformer(nn.Module):
             nn.Linear(d_model, 1),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        hidden = self.input_projection(x) + self.position_embedding[:, : x.shape[1], :]
-        hidden = self.encoder(hidden)
-        pooled = self.norm(hidden[:, -1, :])
+    def forward(
+        self,
+        x_full: torch.Tensor,
+        attention_mask: torch.Tensor,
+        history_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        hidden = self.input_projection(x_full) + self.position_embedding[:, : x_full.shape[1], :]
+        key_padding_mask = ~attention_mask.bool()
+        hidden = self.encoder(hidden, src_key_padding_mask=key_padding_mask)
+        last_indices = torch.clamp(history_lengths.long() - 1, min=0)
+        pooled = hidden[torch.arange(hidden.shape[0], device=hidden.device), last_indices]
+        pooled = self.norm(pooled)
         logits = self.head(pooled).squeeze(-1)
         return logits
 
 
-def iterate_shard_batches(
+def iter_decision_batches(
     path: Path,
     *,
     target_field: str,
@@ -438,14 +450,56 @@ def iterate_shard_batches(
     rng: np.random.Generator,
 ):
     with np.load(path, allow_pickle=False) as data:
-        x = data["x"].astype(np.float32, copy=False)
-        y = data[target_field].astype(np.float32, copy=False)
-        indices = np.arange(x.shape[0])
+        x_full = data["x_full"].astype(np.float32, copy=False)
+        decision_valid_mask = data["decision_valid_mask"].astype(bool, copy=False)
+        decision_end_bucket = data["decision_end_bucket"].astype(np.int16, copy=False)
+        targets = data[target_field].astype(np.float32, copy=False)
+        instantaneous_safe = data["instantaneous_safe_window"].astype(np.uint8, copy=False)
+        stop_label = data["stop_label"].astype(np.uint8, copy=False)
+        y_true = data["y_true_mbps"].astype(np.float32, copy=False)
+        y_pred = data["y_pred_mbps"].astype(np.float32, copy=False)
+        relative_error = data["relative_error"].astype(np.float32, copy=False)
+        uuid = data["uuid"]
+        test_time = data["test_time"]
+        oracle_stop_found = data["oracle_stop_found"].astype(np.uint8, copy=False)
+        oracle_stop_elapsed_ms = data["oracle_stop_elapsed_ms"].astype(np.int32, copy=False)
+
+        test_indices, decision_indices = np.nonzero(decision_valid_mask)
+        example_count = int(test_indices.shape[0])
+        ordering = np.arange(example_count)
         if shuffle:
-            rng.shuffle(indices)
-        for start in range(0, x.shape[0], batch_size):
-            batch_index = indices[start : start + batch_size]
-            yield x[batch_index], y[batch_index]
+            rng.shuffle(ordering)
+
+        positions = np.arange(x_full.shape[1], dtype=np.int16)
+
+        for start in range(0, example_count, batch_size):
+            batch_order = ordering[start : start + batch_size]
+            batch_tests = test_indices[batch_order]
+            batch_decisions = decision_indices[batch_order]
+            batch_end_bucket = decision_end_bucket[batch_tests, batch_decisions]
+            batch_history_lengths = batch_end_bucket.astype(np.int32) + 1
+            batch_attention_mask = (
+                positions.reshape(1, -1) < batch_history_lengths.reshape(-1, 1)
+            ).astype(np.uint8)
+
+            batch = {
+                "x_full": x_full[batch_tests],
+                "attention_mask": batch_attention_mask,
+                "history_lengths": batch_history_lengths,
+                "labels": targets[batch_tests, batch_decisions],
+                "instantaneous_safe_window": instantaneous_safe[batch_tests, batch_decisions],
+                "stop_label": stop_label[batch_tests, batch_decisions],
+                "uuid": uuid[batch_tests],
+                "test_time": test_time[batch_tests],
+                "end_bucket": batch_end_bucket.astype(np.int16, copy=False),
+                "elapsed_ms": batch_history_lengths.astype(np.int32, copy=False) * 100,
+                "y_true_mbps": y_true[batch_tests],
+                "y_pred_mbps": y_pred[batch_tests, batch_decisions],
+                "relative_error": relative_error[batch_tests, batch_decisions],
+                "oracle_stop_found": oracle_stop_found[batch_tests],
+                "oracle_stop_elapsed_ms": oracle_stop_elapsed_ms[batch_tests],
+            }
+            yield batch
 
 
 def train_one_epoch(
@@ -472,19 +526,24 @@ def train_one_epoch(
     stop_early = False
 
     for path in path_bar:
-        path_bar.set_postfix(loss=0.0 if total_examples == 0 else total_loss / total_examples, batches=batch_count)
-        for batch_x, batch_y in iterate_shard_batches(
+        path_bar.set_postfix(
+            loss=0.0 if total_examples == 0 else total_loss / total_examples,
+            batches=batch_count,
+        )
+        for batch in iter_decision_batches(
             path,
             target_field=target_field,
             batch_size=batch_size,
             shuffle=True,
             rng=rng,
         ):
-            inputs = torch.from_numpy(batch_x).to(device=device, dtype=torch.float32)
-            targets = torch.from_numpy(batch_y).to(device=device, dtype=torch.float32)
+            inputs = torch.from_numpy(batch["x_full"]).to(device=device, dtype=torch.float32)
+            attention_mask = torch.from_numpy(batch["attention_mask"]).to(device=device, dtype=torch.bool)
+            history_lengths = torch.from_numpy(batch["history_lengths"]).to(device=device, dtype=torch.long)
+            targets = torch.from_numpy(batch["labels"]).to(device=device, dtype=torch.float32)
 
             optimizer.zero_grad(set_to_none=True)
-            logits = model(inputs)
+            logits = model(inputs, attention_mask, history_lengths)
             loss = criterion(logits, targets)
             loss.backward()
             if clip_grad_norm > 0:
@@ -528,6 +587,8 @@ def predict_subset(
 
     probabilities_list: list[np.ndarray] = []
     labels_list: list[np.ndarray] = []
+    instantaneous_safe_list: list[np.ndarray] = []
+    stop_label_list: list[np.ndarray] = []
     uuid_list: list[np.ndarray] = []
     test_time_list: list[np.ndarray] = []
     end_bucket_list: list[np.ndarray] = []
@@ -535,7 +596,6 @@ def predict_subset(
     y_true_list: list[np.ndarray] = []
     y_pred_list: list[np.ndarray] = []
     relative_error_list: list[np.ndarray] = []
-    stop_label_list: list[np.ndarray] = []
     oracle_stop_found_list: list[np.ndarray] = []
     oracle_stop_elapsed_ms_list: list[np.ndarray] = []
 
@@ -543,57 +603,54 @@ def predict_subset(
         path_bar = tqdm(paths, desc="stage2 eval", unit="shard", dynamic_ncols=True)
         stop_early = False
         for path in path_bar:
-            path_bar.set_postfix(loss=0.0 if total_examples == 0 else total_loss / total_examples, batches=batch_count)
-            with np.load(path, allow_pickle=False) as data:
-                x = data["x"].astype(np.float32, copy=False)
-                labels = data[target_field].astype(np.float32, copy=False)
-                num_examples = int(x.shape[0])
+            path_bar.set_postfix(
+                loss=0.0 if total_examples == 0 else total_loss / total_examples,
+                batches=batch_count,
+            )
+            for batch in iter_decision_batches(
+                path,
+                target_field=target_field,
+                batch_size=batch_size,
+                shuffle=False,
+                rng=np.random.default_rng(0),
+            ):
+                inputs = torch.from_numpy(batch["x_full"]).to(device=device, dtype=torch.float32)
+                attention_mask = torch.from_numpy(batch["attention_mask"]).to(device=device, dtype=torch.bool)
+                history_lengths = torch.from_numpy(batch["history_lengths"]).to(device=device, dtype=torch.long)
+                targets = torch.from_numpy(batch["labels"]).to(device=device, dtype=torch.float32)
 
-                shard_probs: list[np.ndarray] = []
-                shard_labels: list[np.ndarray] = []
+                logits = model(inputs, attention_mask, history_lengths)
+                loss = criterion(logits, targets)
+                probs = torch.sigmoid(logits).cpu().numpy().astype(np.float32, copy=False)
 
-                for start in range(0, num_examples, batch_size):
-                    batch_x = x[start : start + batch_size]
-                    batch_y = labels[start : start + batch_size]
-                    inputs = torch.from_numpy(batch_x).to(device=device, dtype=torch.float32)
-                    targets = torch.from_numpy(batch_y).to(device=device, dtype=torch.float32)
-                    logits = model(inputs)
-                    loss = criterion(logits, targets)
-                    probs = torch.sigmoid(logits).cpu().numpy().astype(np.float32, copy=False)
-
-                    shard_probs.append(probs)
-                    shard_labels.append(batch_y.astype(np.float32, copy=False))
-
-                    batch_size_current = int(batch_y.shape[0])
-                    total_examples += batch_size_current
-                    total_loss += float(loss.item()) * batch_size_current
-                    batch_count += 1
-
-                    if max_batches is not None and batch_count >= max_batches:
-                        stop_early = True
-                        break
-
-                probs_concat = np.concatenate(shard_probs, axis=0)
-                labels_concat = np.concatenate(shard_labels, axis=0)
-
-                probabilities_list.append(probs_concat)
-                labels_list.append(labels_concat)
-                uuid_list.append(data["uuid"][: probs_concat.shape[0]])
-                test_time_list.append(data["test_time"][: probs_concat.shape[0]])
-                end_bucket_list.append(data["end_bucket"][: probs_concat.shape[0]].astype(np.int16, copy=False))
-                elapsed_ms_list.append(data["elapsed_ms"][: probs_concat.shape[0]].astype(np.int32, copy=False))
-                y_true_list.append(data["y_true_mbps"][: probs_concat.shape[0]].astype(np.float32, copy=False))
-                y_pred_list.append(data["y_pred_mbps"][: probs_concat.shape[0]].astype(np.float32, copy=False))
-                relative_error_list.append(
-                    data["relative_error"][: probs_concat.shape[0]].astype(np.float32, copy=False)
+                probabilities_list.append(probs)
+                labels_list.append(batch["labels"].astype(np.float32, copy=False))
+                instantaneous_safe_list.append(
+                    batch["instantaneous_safe_window"].astype(np.uint8, copy=False)
                 )
-                stop_label_list.append(data["stop_label"][: probs_concat.shape[0]].astype(np.uint8, copy=False))
+                stop_label_list.append(batch["stop_label"].astype(np.uint8, copy=False))
+                uuid_list.append(batch["uuid"])
+                test_time_list.append(batch["test_time"])
+                end_bucket_list.append(batch["end_bucket"].astype(np.int16, copy=False))
+                elapsed_ms_list.append(batch["elapsed_ms"].astype(np.int32, copy=False))
+                y_true_list.append(batch["y_true_mbps"].astype(np.float32, copy=False))
+                y_pred_list.append(batch["y_pred_mbps"].astype(np.float32, copy=False))
+                relative_error_list.append(batch["relative_error"].astype(np.float32, copy=False))
                 oracle_stop_found_list.append(
-                    data["oracle_stop_found"][: probs_concat.shape[0]].astype(np.uint8, copy=False)
+                    batch["oracle_stop_found"].astype(np.uint8, copy=False)
                 )
                 oracle_stop_elapsed_ms_list.append(
-                    data["oracle_stop_elapsed_ms"][: probs_concat.shape[0]].astype(np.int32, copy=False)
+                    batch["oracle_stop_elapsed_ms"].astype(np.int32, copy=False)
                 )
+
+                batch_size_current = int(targets.shape[0])
+                total_examples += batch_size_current
+                total_loss += float(loss.item()) * batch_size_current
+                batch_count += 1
+
+                if max_batches is not None and batch_count >= max_batches:
+                    stop_early = True
+                    break
 
             if stop_early:
                 break
@@ -605,6 +662,8 @@ def predict_subset(
         "batches": batch_count,
         "probabilities": np.concatenate(probabilities_list, axis=0) if probabilities_list else np.empty((0,), dtype=np.float32),
         "labels": np.concatenate(labels_list, axis=0) if labels_list else np.empty((0,), dtype=np.float32),
+        "instantaneous_safe_window": np.concatenate(instantaneous_safe_list, axis=0) if instantaneous_safe_list else np.empty((0,), dtype=np.uint8),
+        "stop_label": np.concatenate(stop_label_list, axis=0) if stop_label_list else np.empty((0,), dtype=np.uint8),
         "uuid": np.concatenate(uuid_list, axis=0) if uuid_list else np.empty((0,), dtype=np.str_),
         "test_time": np.concatenate(test_time_list, axis=0) if test_time_list else np.empty((0,), dtype=np.str_),
         "end_bucket": np.concatenate(end_bucket_list, axis=0) if end_bucket_list else np.empty((0,), dtype=np.int16),
@@ -612,7 +671,6 @@ def predict_subset(
         "y_true_mbps": np.concatenate(y_true_list, axis=0) if y_true_list else np.empty((0,), dtype=np.float32),
         "y_pred_mbps": np.concatenate(y_pred_list, axis=0) if y_pred_list else np.empty((0,), dtype=np.float32),
         "relative_error": np.concatenate(relative_error_list, axis=0) if relative_error_list else np.empty((0,), dtype=np.float32),
-        "stop_label": np.concatenate(stop_label_list, axis=0) if stop_label_list else np.empty((0,), dtype=np.uint8),
         "oracle_stop_found": np.concatenate(oracle_stop_found_list, axis=0) if oracle_stop_found_list else np.empty((0,), dtype=np.uint8),
         "oracle_stop_elapsed_ms": np.concatenate(oracle_stop_elapsed_ms_list, axis=0) if oracle_stop_elapsed_ms_list else np.empty((0,), dtype=np.int32),
     }
@@ -627,7 +685,7 @@ def compute_policy_metrics(outputs: dict[str, object], threshold: float) -> dict
     y_true_mbps = np.asarray(outputs["y_true_mbps"], dtype=np.float32)
     y_pred_mbps = np.asarray(outputs["y_pred_mbps"], dtype=np.float32)
     relative_error = np.asarray(outputs["relative_error"], dtype=np.float32)
-    stop_label = np.asarray(outputs["stop_label"], dtype=np.uint8)
+    instantaneous_safe = np.asarray(outputs["instantaneous_safe_window"], dtype=np.uint8)
     oracle_stop_found = np.asarray(outputs["oracle_stop_found"], dtype=np.uint8)
     oracle_stop_elapsed_ms = np.asarray(outputs["oracle_stop_elapsed_ms"], dtype=np.int32)
 
@@ -636,7 +694,7 @@ def compute_policy_metrics(outputs: dict[str, object], threshold: float) -> dict
         grouped_rows.setdefault(key, []).append(idx)
 
     emitted_stops = 0
-    within_epsilon = 0
+    actually_within_epsilon = 0
     stop_elapsed_values: list[float] = []
     stop_relative_error_values: list[float] = []
     stop_abs_error_values: list[float] = []
@@ -665,8 +723,8 @@ def compute_policy_metrics(outputs: dict[str, object], threshold: float) -> dict
         stop_abs_error_values.append(stop_abs_error)
         savings_vs_full_values.append(full_elapsed - stop_elapsed)
 
-        if int(stop_label[chosen_idx]) == 1:
-            within_epsilon += 1
+        if int(instantaneous_safe[chosen_idx]) == 1:
+            actually_within_epsilon += 1
 
         if int(oracle_stop_found[row_indices[0]]) == 1:
             oracle_tests += 1
@@ -676,7 +734,7 @@ def compute_policy_metrics(outputs: dict[str, object], threshold: float) -> dict
     return {
         "tests": total_tests,
         "emitted_stop_rate": safe_divide(emitted_stops, total_tests),
-        "within_epsilon_rate": safe_divide(within_epsilon, total_tests),
+        "within_epsilon_rate": safe_divide(actually_within_epsilon, total_tests),
         "mean_stop_elapsed_ms": safe_mean(stop_elapsed_values),
         "median_stop_elapsed_ms": safe_median(stop_elapsed_values),
         "mean_stop_relative_error": safe_mean(stop_relative_error_values),
@@ -771,12 +829,12 @@ def main() -> None:
         for subset in args.eval_subsets
     }
 
-    window_size_buckets, feature_dim = infer_shape_from_first_shard(train_paths)
+    max_sequence_buckets, feature_dim, _ = infer_shape_from_first_shard(train_paths)
     pos_weight = compute_pos_weight(args, dataset_summary)
 
     model = Stage2Transformer(
         input_dim=feature_dim,
-        window_size_buckets=window_size_buckets,
+        max_sequence_buckets=max_sequence_buckets,
         d_model=args.d_model,
         num_heads=args.num_heads,
         num_layers=args.num_layers,
@@ -784,7 +842,7 @@ def main() -> None:
         dropout=args.dropout,
     ).to(device)
 
-    optimizer = torch.optim.AdamW(
+    optimizer = torch.optim.Adam(
         model.parameters(),
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
@@ -867,7 +925,7 @@ def main() -> None:
         {
             "model_state_dict": model.state_dict(),
             "config": {
-                "window_size_buckets": window_size_buckets,
+                "max_sequence_buckets": max_sequence_buckets,
                 "feature_dim": feature_dim,
                 "d_model": args.d_model,
                 "num_heads": args.num_heads,
@@ -914,7 +972,7 @@ def main() -> None:
         "best_threshold": best_threshold,
         "best_selection_metric": args.selection_metric,
         "best_selection_score": best_score,
-        "window_size_buckets": window_size_buckets,
+        "max_sequence_buckets": max_sequence_buckets,
         "feature_dim": feature_dim,
         "history": history,
         "final_metrics": final_metrics,

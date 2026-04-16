@@ -91,37 +91,60 @@ Stage 2 Label Sweep
 - Sanity check:
   - higher epsilon produced earlier oracle stop times and higher positive-window rates
   - this is the expected monotonic behavior
+- Important:
+  - these first-pass label artifacts were generated before the permanent-safe suffix oracle fix
+  - they should be treated as stale
+  - they remain useful for standalone oracle analysis, but the rewritten paper-faithful Stage 2 dataset builder no longer depends on them for training
 
 Stage 2 Scripts Added
 - `scripts/build_stage2_stop_labels.py`
   - builds epsilon-specific stop/continue labels and oracle stop indices from Stage 1 scored outputs
+  - oracle definition corrected to a permanent-safe suffix oracle
+  - `stop_label` definition corrected to monotonic suffix labels from the oracle stop point
 - `scripts/build_stage2_transformer_dataset.py`
-  - joins Stage 1 windows, Stage 1 predictions, and Stage 2 labels into tensor-ready `[N, 20, 13]` shards
+  - rewritten for paper fidelity
+  - reads normalized full-test histories from `artifacts_exact_public/normalized_shards/`
+  - re-scores Stage 1 at `500 ms` decision stride using the trained `stage1_xgboost_full_windows` model
+  - writes one example per test with `x_full` and per-decision tables
+  - computes the corrected permanent-safe suffix oracle directly on those decision points
 - `scripts/train_stage2_transformer.py`
-  - trains a Transformer stop-policy model
+  - rewritten for paper fidelity
+  - trains a masked full-history Transformer stop-policy model
+  - uses paper-aligned defaults:
+    - `batch_size = 4096`
+    - `learning_rate = 1e-3`
+    - `num_heads = 8`
+    - `num_layers = 8`
+    - optimizer: `Adam`
   - tunes the stop threshold on `val`
   - reports both window-level classification metrics and per-test early-exit policy metrics
+  - computes `within_epsilon_rate` from realized per-decision error, not from the training label alone
 
 Stage 2 Documentation Updated
 - `MODEL_READY_PIPELINE.md`
-  - added Step 9 for Stage 2 dataset materialization
-  - added Step 10 for Stage 2 Transformer training
+  - Step 8 documents the corrected monotonic suffix oracle labels
+  - Step 9 now documents the rewritten full-history Stage 2 dataset builder
+  - Step 10 now documents the rewritten paper-faithful Transformer trainer
   - documented probe commands and Linux / WSL `TMPDIR` note for `torch`
 
 Stage 2 Implementation Verification
 - New scripts were syntax-checked successfully.
-- `build_stage2_transformer_dataset.py` imports cleanly.
-- `train_stage2_transformer.py` imports cleanly.
+- `build_stage2_transformer_dataset.py --help` executed successfully.
+- `train_stage2_transformer.py --help` executed successfully.
 - Transformer smoke test:
-  - forward pass on a real Stage 1 window shard succeeded
+  - forward pass on synthetic `[B, 100, 13]` full-history input succeeded
   - backward pass succeeded
+- Dataset builder default paths corrected to:
+  - `artifacts_exact_public/stage1_xgboost_full_windows/stage1_xgboost_model.json`
+  - `artifacts_exact_public/stage1_xgboost_full_windows/training_summary.json`
 - Runtime environment note:
   - in this Linux shell, `torch` required a writable temp directory
   - working override: `TMPDIR=/dev/shm`
+  - the trainer now also tries to auto-select a writable temp directory if `TMPDIR` is unset
 
 Stage 2 Immediate Commands
 - Materialize one epsilon-specific dataset, example `epsilon = 10`:
-  - `python3 /mnt/e/fmfstlt/scripts/build_stage2_transformer_dataset.py --window-root /mnt/e/fmfstlt/artifacts_exact_public/stage1_windows --prediction-root /mnt/e/fmfstlt/artifacts_exact_public/stage1_predictions_full_windows --label-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_labels_full_windows_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10`
+  - `python3 /mnt/e/fmfstlt/scripts/build_stage2_transformer_dataset.py --epsilon 10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10`
 - Train one Stage 2 Transformer on that dataset:
   - `python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10`
 - Cheap probe run before full training:

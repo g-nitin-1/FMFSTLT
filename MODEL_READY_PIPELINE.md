@@ -181,8 +181,8 @@ qsub scripts/build_stage1_windows_iitd.pbs
 
 Default outputs:
 
-- [`artifacts_exact_public/stage1_xgboost/stage1_xgboost_model.json`](/mnt/e/fmfstlt/artifacts_exact_public/stage1_xgboost/stage1_xgboost_model.json)
-- [`artifacts_exact_public/stage1_xgboost/training_summary.json`](/mnt/e/fmfstlt/artifacts_exact_public/stage1_xgboost/training_summary.json)
+- [`artifacts_exact_public/stage1_xgboost_full_windows/stage1_xgboost_model.json`](/mnt/e/fmfstlt/artifacts_exact_public/stage1_xgboost_full_windows/stage1_xgboost_model.json)
+- [`artifacts_exact_public/stage1_xgboost_full_windows/training_summary.json`](/mnt/e/fmfstlt/artifacts_exact_public/stage1_xgboost_full_windows/training_summary.json)
 
 Defaults:
 
@@ -240,11 +240,17 @@ Each label shard stores:
 - `stop_label`
 - `continue_label`
 - `is_oracle_stop_window`
+- `instantaneous_safe_window`
 - `abs_error_mbps`
 - `relative_error`
 - repeated oracle stop metadata for the corresponding test
 
-The label builder currently treats Stage 2 stop labels as an epsilon-threshold on the current Stage 1 prediction error and separately records the earliest acceptable stop index per test.
+The label builder uses a monotonic-safe suffix oracle:
+
+- first, it finds the earliest decision time `t*` such that all later windows for that test remain within `epsilon`
+- then it writes `stop_label = 1` for all windows at `t >= t*`
+- `is_oracle_stop_window` marks only the single oracle entry point at `t*`
+- `instantaneous_safe_window` keeps the per-window instantaneous `error <= epsilon` indicator for debugging and analysis
 
 For `--error-kind relative`, the default is paper-style percentage units:
 
@@ -255,10 +261,10 @@ This aligns with paper-style evaluation sweeps like `epsilon in {5, 10, 15, 20, 
 
 ## Step 9: Materialize The Stage 2 Transformer Dataset
 
-Join the existing Stage 1 windows, Stage 1 predictions, and epsilon-specific Stage 2 labels into tensor-ready Stage 2 shards.
+Materialize a paper-faithful Stage 2 dataset directly from the normalized full-test shards and the trained Stage 1 regressor.
 
 ```bash
-python3 /mnt/e/fmfstlt/scripts/build_stage2_transformer_dataset.py --window-root /mnt/e/fmfstlt/artifacts_exact_public/stage1_windows --prediction-root /mnt/e/fmfstlt/artifacts_exact_public/stage1_predictions_full_windows --label-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_labels_full_windows_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10
+python3 /mnt/e/fmfstlt/scripts/build_stage2_transformer_dataset.py --epsilon 10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10
 ```
 
 Default outputs:
@@ -266,21 +272,29 @@ Default outputs:
 - tensor-ready shards under `stage2_transformer_dataset/.../<subset>/*.npz`
 - summary metrics at `stage2_transformer_dataset/stage2_dataset_summary.json`
 
+This step does not join the earlier `stage1_predictions_full_windows` or `stage2_labels_full_windows_eps_*` artifacts. Instead it:
+
+- reads the normalized dense test histories from `normalized_shards`
+- rescoring only the paper decision points at `500 ms` stride by default
+- applies the corrected permanent-safe suffix oracle on those decision points
+- writes one example per test with the full history plus per-decision tables
+
 Each Stage 2 dataset shard stores:
 
-- `x` as `[N, 20, 13]`
+- `x_full` as `[N, 100, 13]`
+- `bucket_mask`
+- `decision_valid_mask`
+- `decision_end_bucket`
+- `decision_elapsed_ms`
+- `decision_observed_buckets_seen`
+- `y_pred_mbps`
+- `abs_error_mbps`
+- `relative_error`
+- `instantaneous_safe_window`
 - `stop_label`
+- `continue_label`
 - `is_oracle_stop_window`
-- current Stage 1 `y_pred_mbps`
-- `y_true_mbps`
-- per-window error metadata
-- repeated per-test oracle metadata
-
-This materialization is a strict join on shard name and row order. It verifies alignment between:
-
-- Stage 1 windows
-- Stage 1 scored predictions
-- epsilon-specific Stage 2 labels
+- repeated oracle metadata per test
 
 ## Step 10: Train The Stage 2 Transformer
 
@@ -297,10 +311,17 @@ Default outputs:
 
 The trainer:
 
-- consumes tensor-ready Stage 2 shards
-- trains a Transformer encoder on `stop_label` by default
+- consumes the full-history Stage 2 dataset shards
+- trains a masked Transformer encoder on `stop_label` by default
 - tunes the decision threshold on `val`
 - evaluates both window-level classification quality and per-test early-exit policy metrics on `val`, `test`, and `robustness`
+- uses paper-aligned defaults for the main architecture and optimizer:
+  - `batch_size = 4096`
+  - `learning_rate = 1e-3`
+  - `num_heads = 8`
+  - `num_layers = 8`
+  - optimizer: `Adam`
+- reports `within_epsilon_rate` from the realized per-decision error signal, not from the training label alone
 
 Useful probe:
 
@@ -308,7 +329,7 @@ Useful probe:
 python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10_probe --max-train-shards 2 --max-eval-shards 1 --max-train-batches-per-epoch 10 --epochs 1
 ```
 
-If `torch` complains about not finding a usable temp directory in a Linux or WSL shell, set `TMPDIR` before running:
+If `torch` complains about not finding a usable temp directory in a Linux or WSL shell, set `TMPDIR` before running. The trainer will also try to select a writable temp directory automatically if `TMPDIR` is unset:
 
 ```bash
 env TMPDIR=/dev/shm python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py ...

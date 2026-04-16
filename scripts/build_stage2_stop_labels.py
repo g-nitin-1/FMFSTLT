@@ -162,12 +162,29 @@ class OracleRecord:
     final_end_bucket: int = -1
     final_elapsed_ms: int = -1
     final_observed_buckets_seen: int = -1
+    last_seen_end_bucket: int = -1
+    last_window_safe: bool = False
+    candidate_stop_found: bool = False
+    candidate_stop_end_bucket: int = -1
+    candidate_stop_elapsed_ms: int = -1
+    candidate_stop_observed_buckets_seen: int = -1
+    candidate_stop_abs_error_mbps: float = float("nan")
+    candidate_stop_relative_error: float = float("nan")
     oracle_stop_found: bool = False
     oracle_stop_end_bucket: int = -1
     oracle_stop_elapsed_ms: int = -1
     oracle_stop_observed_buckets_seen: int = -1
     oracle_stop_abs_error_mbps: float = float("nan")
     oracle_stop_relative_error: float = float("nan")
+
+
+def clear_candidate_stop(record: OracleRecord) -> None:
+    record.candidate_stop_found = False
+    record.candidate_stop_end_bucket = -1
+    record.candidate_stop_elapsed_ms = -1
+    record.candidate_stop_observed_buckets_seen = -1
+    record.candidate_stop_abs_error_mbps = float("nan")
+    record.candidate_stop_relative_error = float("nan")
 
 
 def build_oracle_map(
@@ -230,18 +247,37 @@ def build_oracle_map(
                     record.final_elapsed_ms = int(elapsed_ms[idx])
                     record.final_observed_buckets_seen = int(observed_buckets_seen[idx])
 
-                if stop_mask[idx] and (
-                    not record.oracle_stop_found
-                    or current_end_bucket < record.oracle_stop_end_bucket
-                ):
-                    record.oracle_stop_found = True
-                    record.oracle_stop_end_bucket = current_end_bucket
-                    record.oracle_stop_elapsed_ms = int(elapsed_ms[idx])
-                    record.oracle_stop_observed_buckets_seen = int(observed_buckets_seen[idx])
-                    record.oracle_stop_abs_error_mbps = float(abs_error[idx])
-                    record.oracle_stop_relative_error = float(relative_error[idx])
+                if record.last_seen_end_bucket > current_end_bucket:
+                    raise ValueError(
+                        f"non-monotonic end_bucket order for test {(uuid, test_time)}: "
+                        f"{current_end_bucket} after {record.last_seen_end_bucket}"
+                    )
+                record.last_seen_end_bucket = current_end_bucket
+
+                if stop_mask[idx]:
+                    record.last_window_safe = True
+                    if not record.candidate_stop_found:
+                        record.candidate_stop_found = True
+                        record.candidate_stop_end_bucket = current_end_bucket
+                        record.candidate_stop_elapsed_ms = int(elapsed_ms[idx])
+                        record.candidate_stop_observed_buckets_seen = int(observed_buckets_seen[idx])
+                        record.candidate_stop_abs_error_mbps = float(abs_error[idx])
+                        record.candidate_stop_relative_error = float(relative_error[idx])
+                else:
+                    record.last_window_safe = False
+                    clear_candidate_stop(record)
 
     path_bar.close()
+
+    for record in oracle_map.values():
+        if record.last_window_safe and record.candidate_stop_found:
+            record.oracle_stop_found = True
+            record.oracle_stop_end_bucket = record.candidate_stop_end_bucket
+            record.oracle_stop_elapsed_ms = record.candidate_stop_elapsed_ms
+            record.oracle_stop_observed_buckets_seen = record.candidate_stop_observed_buckets_seen
+            record.oracle_stop_abs_error_mbps = record.candidate_stop_abs_error_mbps
+            record.oracle_stop_relative_error = record.candidate_stop_relative_error
+
     return oracle_map
 
 
@@ -308,6 +344,8 @@ def write_oracle_index_file(
             ),
             dtype=np.float32,
         ),
+        oracle_definition=np.array("permanent_safe_suffix", dtype=np.str_),
+        stop_label_definition=np.array("monotonic_suffix_from_oracle", dtype=np.str_),
     )
     return out_path
 
@@ -376,22 +414,23 @@ def write_label_shards(
                 y_pred=y_pred,
                 relative_denominator_floor=relative_denominator_floor,
             )
-            stop_mask = stop_mask_for_error_kind(
+            instantaneous_safe_mask = stop_mask_for_error_kind(
                 abs_error=abs_error,
                 relative_error=relative_error,
                 epsilon=epsilon,
                 error_kind=error_kind,
                 relative_epsilon_unit=relative_epsilon_unit,
             )
-            continue_mask = np.logical_not(stop_mask)
+            stop_label = np.zeros_like(instantaneous_safe_mask, dtype=np.uint8)
+            continue_label = np.ones_like(instantaneous_safe_mask, dtype=np.uint8)
 
-            oracle_stop_found = np.zeros_like(stop_mask, dtype=np.uint8)
-            oracle_stop_end_bucket = np.full(stop_mask.shape, -1, dtype=np.int16)
-            oracle_stop_elapsed_ms = np.full(stop_mask.shape, -1, dtype=np.int32)
-            oracle_stop_observed_buckets_seen = np.full(stop_mask.shape, -1, dtype=np.int16)
-            oracle_stop_abs_error_mbps = np.full(stop_mask.shape, np.nan, dtype=np.float32)
-            oracle_stop_relative_error = np.full(stop_mask.shape, np.nan, dtype=np.float32)
-            is_oracle_stop_window = np.zeros_like(stop_mask, dtype=np.uint8)
+            oracle_stop_found = np.zeros_like(instantaneous_safe_mask, dtype=np.uint8)
+            oracle_stop_end_bucket = np.full(instantaneous_safe_mask.shape, -1, dtype=np.int16)
+            oracle_stop_elapsed_ms = np.full(instantaneous_safe_mask.shape, -1, dtype=np.int32)
+            oracle_stop_observed_buckets_seen = np.full(instantaneous_safe_mask.shape, -1, dtype=np.int16)
+            oracle_stop_abs_error_mbps = np.full(instantaneous_safe_mask.shape, np.nan, dtype=np.float32)
+            oracle_stop_relative_error = np.full(instantaneous_safe_mask.shape, np.nan, dtype=np.float32)
+            is_oracle_stop_window = np.zeros_like(instantaneous_safe_mask, dtype=np.uint8)
 
             for idx, (uuid, test_time) in enumerate(zip(uuids, test_times)):
                 record = oracle_map[(uuid, test_time)]
@@ -402,15 +441,19 @@ def write_label_shards(
                     oracle_stop_observed_buckets_seen[idx] = record.oracle_stop_observed_buckets_seen
                     oracle_stop_abs_error_mbps[idx] = record.oracle_stop_abs_error_mbps
                     oracle_stop_relative_error[idx] = record.oracle_stop_relative_error
+                    if int(end_bucket[idx]) >= record.oracle_stop_end_bucket:
+                        stop_label[idx] = 1
+                        continue_label[idx] = 0
                     if int(end_bucket[idx]) == record.oracle_stop_end_bucket:
                         is_oracle_stop_window[idx] = 1
 
             out_path = subset_dir / path.name
             np.savez(
                 out_path,
-                stop_label=stop_mask.astype(np.uint8),
-                continue_label=continue_mask.astype(np.uint8),
+                stop_label=stop_label,
+                continue_label=continue_label,
                 is_oracle_stop_window=is_oracle_stop_window,
+                instantaneous_safe_window=instantaneous_safe_mask.astype(np.uint8),
                 abs_error_mbps=abs_error,
                 relative_error=relative_error,
                 oracle_stop_found=oracle_stop_found,
@@ -430,13 +473,15 @@ def write_label_shards(
                     ),
                     dtype=np.float32,
                 ),
+                oracle_definition=np.array("permanent_safe_suffix", dtype=np.str_),
+                stop_label_definition=np.array("monotonic_suffix_from_oracle", dtype=np.str_),
                 source_prediction_npz=np.array(str(path), dtype=np.str_),
                 model_path=data["model_path"],
                 best_iteration=data["best_iteration"],
             )
 
-            subset_windows += int(stop_mask.shape[0])
-            subset_positive_windows += int(stop_mask.sum())
+            subset_windows += int(stop_label.shape[0])
+            subset_positive_windows += int(stop_label.sum())
             subset_oracle_windows += int(is_oracle_stop_window.sum())
 
             manifest_entries.append(
@@ -444,7 +489,7 @@ def write_label_shards(
                     "subset": subset,
                     "source_prediction_npz": str(path),
                     "label_npz": str(out_path),
-                    "examples": int(stop_mask.shape[0]),
+                    "examples": int(stop_label.shape[0]),
                 }
             )
             print(f"labeled {out_path}")
@@ -489,6 +534,8 @@ def main() -> None:
         "relative_epsilon_unit": args.relative_epsilon_unit,
         "effective_relative_epsilon_fraction": effective_relative_epsilon_fraction,
         "relative_denominator_floor": args.relative_denominator_floor,
+        "oracle_definition": "permanent_safe_suffix",
+        "stop_label_definition": "monotonic_suffix_from_oracle",
         "subsets": {},
     }
     manifest_entries: list[dict[str, object]] = []
