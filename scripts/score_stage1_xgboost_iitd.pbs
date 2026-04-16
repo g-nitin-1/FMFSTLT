@@ -1,0 +1,39 @@
+#!/bin/bash
+#PBS -N tt_stage1_score
+#PBS -P cc
+# Replace "cc" with your actual HPC project if different.
+#PBS -q standard
+#PBS -m bea
+#PBS -M $USER@iitd.ac.in
+#PBS -l select=1:ncpus=16
+#PBS -l walltime=24:00:00
+
+set -euo pipefail
+
+REPO_ROOT="${REPO_ROOT:-$PBS_O_WORKDIR}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+STAGE1_INPUT_ROOT="${STAGE1_INPUT_ROOT:-${SCRATCH:-$REPO_ROOT}/fmfstlt_stage1_windows}"
+STAGE1_MODEL_ROOT="${STAGE1_MODEL_ROOT:-${SCRATCH:-$REPO_ROOT}/fmfstlt_stage1_xgboost}"
+STAGE1_OUTPUT_ROOT="${STAGE1_OUTPUT_ROOT:-${SCRATCH:-$REPO_ROOT}/fmfstlt_stage1_predictions}"
+
+cd "$REPO_ROOT"
+mkdir -p "$STAGE1_OUTPUT_ROOT"
+
+export PYTHONUNBUFFERED=1
+unset PYTHONPATH PYTHONHOME PYTHONUSERBASE
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+echo "repo_root=$REPO_ROOT"
+echo "python_bin=$PYTHON_BIN"
+echo "stage1_input_root=$STAGE1_INPUT_ROOT"
+echo "stage1_model_root=$STAGE1_MODEL_ROOT"
+echo "stage1_output_root=$STAGE1_OUTPUT_ROOT"
+
+"$PYTHON_BIN" "$REPO_ROOT/scripts/score_stage1_xgboost.py" \
+  --input-root "$STAGE1_INPUT_ROOT" \
+  --model-path "$STAGE1_MODEL_ROOT/stage1_xgboost_model.json" \
+  --training-summary-path "$STAGE1_MODEL_ROOT/training_summary.json" \
+  --output-root "$STAGE1_OUTPUT_ROOT"

@@ -3,3 +3,8 @@
 
 # Generated dataset exports
 exports/
+exports_exact_public/
+exports_exact_public_full/
+artifacts_exact_public/
+
+extra/

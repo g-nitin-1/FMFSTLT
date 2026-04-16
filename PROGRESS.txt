@@ -1,0 +1,132 @@
+FMFSTLT Progress Note
+Updated: 2026-04-16
+
+Completed Data Pipeline
+- Built exact public raw shards under `artifacts_exact_public/raw_shards/`.
+- Computed train normalization statistics in `artifacts_exact_public/train_stats.npz`.
+- Materialized normalized shards under `artifacts_exact_public/normalized_shards/`.
+- Built Stage 1 UUID split in `artifacts_exact_public/stage1_uuid_split.npz`.
+
+Important Stage 1 Fixes
+- Fixed Stage 1 padding in `scripts/build_stage1_regression_windows.py`.
+- Paper requirement: for `t < 2s`, duplicate the latest 100 ms bucket.
+- Code now pads with `window[-1:]` instead of `window[:1]`.
+- Consequence: Stage 1 windows had to be regenerated after this fix.
+
+Stage 1 Window Build
+- Rebuilt Stage 1 windows from normalized shards into `artifacts_exact_public/stage1_windows/`.
+- Full Stage 1 corpus size:
+  - train examples: 20,715,228
+  - val examples: 2,304,715
+  - train shards: 231
+  - val shards: 50
+
+Environment / Runtime Notes
+- HPC CPU path was validated successfully after building a Python 3.10 environment on scratch and scrubbing `PYTHONPATH`.
+- Native Windows PowerShell was faster than both IITD HPC CPU and WSL `/mnt/e` on the probe comparison.
+- Probe timing comparison on the same Stage 1 subset:
+  - Windows PowerShell, `--nthread 8`: about 2m14s
+  - Windows PowerShell, `--nthread 16`: about 2m31s
+  - Windows PowerShell, `--nthread 24`: about 2m23s
+  - IITD HPC CPU, `--nthread 8`: about 3m02s
+- Decision taken: run the full Stage 1 training on native Windows PowerShell with `--nthread 8`.
+
+Stage 1 Full Training
+- Command used:
+  - `python E:\fmfstlt\scripts\train_stage1_xgboost.py --input-root E:\fmfstlt\artifacts_exact_public\stage1_windows --output-root E:\fmfstlt\artifacts_exact_public\stage1_xgboost_full_windows --nthread 8`
+- Outcome:
+  - completed successfully
+  - runtime shown by tqdm: 2h37m49s for 1500 rounds
+  - best_iteration: 1499
+  - early stopping did not trigger
+- Outputs:
+  - model: `artifacts_exact_public/stage1_xgboost_full_windows/stage1_xgboost_model.json`
+  - summary: `artifacts_exact_public/stage1_xgboost_full_windows/training_summary.json`
+
+Stage 1 Full Scoring
+- Command used:
+  - `python E:\fmfstlt\scripts\score_stage1_xgboost.py --input-root E:\fmfstlt\artifacts_exact_public\stage1_windows --model-path E:\fmfstlt\artifacts_exact_public\stage1_xgboost_full_windows\stage1_xgboost_model.json --training-summary-path E:\fmfstlt\artifacts_exact_public\stage1_xgboost_full_windows\training_summary.json --output-root E:\fmfstlt\artifacts_exact_public\stage1_predictions_full_windows`
+- Outcome:
+  - completed successfully on `train`, `val`, `test`, and `robustness`
+- Outputs:
+  - predictions: `artifacts_exact_public/stage1_predictions_full_windows/`
+  - metrics: `artifacts_exact_public/stage1_predictions_full_windows/metrics_summary.json`
+  - manifest: `artifacts_exact_public/stage1_predictions_full_windows/manifest_stage1_predictions.json`
+
+Stage 1 Overall Metrics
+- train:
+  - RMSE: 47.76306673229301
+  - MAE: 19.61693792165765
+  - mean_relative_error: 0.3731729000557695
+- val:
+  - RMSE: 52.47924592695343
+  - MAE: 19.884737680418187
+  - mean_relative_error: 0.3699045515838252
+- test:
+  - RMSE: 46.19824943367217
+  - MAE: 18.547237694671118
+  - mean_relative_error: 0.35346597715933004
+- robustness:
+  - RMSE: 173.52057884391027
+  - MAE: 35.229896297092374
+  - mean_relative_error: 0.34140484824034895
+
+Current Status
+- Stage 1 is complete end to end:
+  - corrected windows built
+  - paper-scale XGBoost regressor trained
+  - full scoring run completed
+  - metrics and prediction artifacts saved
+
+Stage 2 Label Sweep
+- Paper-aligned epsilon sweep generated for:
+  - 5, 10, 15, 20, 25, 30, 35
+- Output roots:
+  - `artifacts_exact_public/stage2_labels_full_windows_eps_<epsilon>/`
+- Example completed outputs:
+  - `stage2_label_summary.json`
+  - `manifest_stage2_labels.json`
+  - per-subset label shards
+  - per-subset oracle stop index tables
+- Sanity check:
+  - higher epsilon produced earlier oracle stop times and higher positive-window rates
+  - this is the expected monotonic behavior
+
+Stage 2 Scripts Added
+- `scripts/build_stage2_stop_labels.py`
+  - builds epsilon-specific stop/continue labels and oracle stop indices from Stage 1 scored outputs
+- `scripts/build_stage2_transformer_dataset.py`
+  - joins Stage 1 windows, Stage 1 predictions, and Stage 2 labels into tensor-ready `[N, 20, 13]` shards
+- `scripts/train_stage2_transformer.py`
+  - trains a Transformer stop-policy model
+  - tunes the stop threshold on `val`
+  - reports both window-level classification metrics and per-test early-exit policy metrics
+
+Stage 2 Documentation Updated
+- `MODEL_READY_PIPELINE.md`
+  - added Step 9 for Stage 2 dataset materialization
+  - added Step 10 for Stage 2 Transformer training
+  - documented probe commands and Linux / WSL `TMPDIR` note for `torch`
+
+Stage 2 Implementation Verification
+- New scripts were syntax-checked successfully.
+- `build_stage2_transformer_dataset.py` imports cleanly.
+- `train_stage2_transformer.py` imports cleanly.
+- Transformer smoke test:
+  - forward pass on a real Stage 1 window shard succeeded
+  - backward pass succeeded
+- Runtime environment note:
+  - in this Linux shell, `torch` required a writable temp directory
+  - working override: `TMPDIR=/dev/shm`
+
+Stage 2 Immediate Commands
+- Materialize one epsilon-specific dataset, example `epsilon = 10`:
+  - `python3 /mnt/e/fmfstlt/scripts/build_stage2_transformer_dataset.py --window-root /mnt/e/fmfstlt/artifacts_exact_public/stage1_windows --prediction-root /mnt/e/fmfstlt/artifacts_exact_public/stage1_predictions_full_windows --label-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_labels_full_windows_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10`
+- Train one Stage 2 Transformer on that dataset:
+  - `python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10`
+- Cheap probe run before full training:
+  - `python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10_probe --max-train-shards 2 --max-eval-shards 1 --max-train-batches-per-epoch 10 --epochs 1`
+
+Current Next Step
+- Materialize a Stage 2 Transformer dataset for each epsilon of interest.
+- Then train and evaluate one Stage 2 Transformer per epsilon.
