@@ -323,11 +323,39 @@ The trainer:
   - optimizer: `Adam`
 - reports `within_epsilon_rate` from the realized per-decision error signal, not from the training label alone
 
+Practical runtime note for the current repo environment:
+
+- paper defaults are implemented, but they may not fit on a laptop GPU at `batch_size = 4096`
+- on the current RTX 5080 Laptop GPU setup, `--batch-size 1024` passed local WSL CUDA probe runs, while `2048` and `4096` crashed the system
+- `train_stage2_transformer.py` now supports `--gradient-accumulation-steps`, so a run with `--batch-size 1024 --gradient-accumulation-steps 4` matches the paper's effective batch size of `4096` without requiring `4096` examples in VRAM at once
+- if your Windows Python has a CPU-only PyTorch build but WSL has CUDA-enabled PyTorch, run Stage 2 training from WSL
+
 Useful probe:
 
 ```bash
-python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10_probe --max-train-shards 2 --max-eval-shards 1 --max-train-batches-per-epoch 10 --epochs 1
+python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10_probe_gpu --batch-size 1024 --gradient-accumulation-steps 4 --max-train-shards 1 --max-eval-shards 1 --max-train-batches-per-epoch 2 --max-eval-batches 1 --epochs 1 --device cuda
 ```
+
+Practical full-training command on the current WSL CUDA setup:
+
+```bash
+python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10 --batch-size 1024 --gradient-accumulation-steps 4 --device cuda
+```
+
+Completed `epsilon = 10` local WSL CUDA run:
+
+- output root: `artifacts_exact_public/stage2_transformer_eps_10_local_gpu_bs1024_acc4`
+- physical batch size: `1024`
+- gradient accumulation steps: `4`
+- effective batch size: `4096`
+- runtime: about `476` minutes wall clock on the RTX 5080 Laptop GPU
+- best epoch: `3`
+- best threshold: `0.25`
+- final validation F1: `0.8696`
+- final test F1: `0.8608`
+- final robustness F1: `0.8565`
+- final test within-epsilon stop rate: `0.6786`
+- final test mean savings vs full-run decision: `5144.7 ms`
 
 If `torch` complains about not finding a usable temp directory in a Linux or WSL shell, set `TMPDIR` before running. The trainer will also try to select a writable temp directory automatically if `TMPDIR` is unset:
 

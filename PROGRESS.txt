@@ -1,5 +1,5 @@
 FMFSTLT Progress Note
-Updated: 2026-04-16
+Updated: 2026-04-17
 
 Completed Data Pipeline
 - Built exact public raw shards under `artifacts_exact_public/raw_shards/`.
@@ -78,6 +78,20 @@ Current Status
   - full scoring run completed
   - metrics and prediction artifacts saved
 
+Stage 2 Dataset Build
+- Completed a paper-faithful Stage 2 dataset materialization for `epsilon = 10`.
+- Command used:
+  - `python E:\fmfstlt\scripts\build_stage2_transformer_dataset.py --epsilon 10 --output-root E:\fmfstlt\artifacts_exact_public\stage2_transformer_dataset_eps_10`
+- Outputs:
+  - dataset root: `artifacts_exact_public/stage2_transformer_dataset_eps_10/`
+  - summary: `artifacts_exact_public/stage2_transformer_dataset_eps_10/stage2_dataset_summary.json`
+  - manifest: `artifacts_exact_public/stage2_transformer_dataset_eps_10/manifest_stage2_transformer_dataset.json`
+- Summary at `epsilon = 10`:
+  - train: `717,279` tests, `13,450,705` decisions, stop-positive rate `0.5367`, oracle-stop-over-tests `0.7965`
+  - val: `79,713` tests, `1,495,788` decisions, stop-positive rate `0.5372`, oracle-stop-over-tests `0.7963`
+  - test: `39,877` tests, `749,908` decisions, stop-positive rate `0.5155`, oracle-stop-over-tests `0.7972`
+  - robustness: `132,435` tests, `2,486,881` decisions, stop-positive rate `0.5165`, oracle-stop-over-tests `0.7953`
+
 Stage 2 Label Sweep
 - Paper-aligned epsilon sweep generated for:
   - 5, 10, 15, 20, 25, 30, 35
@@ -142,14 +156,82 @@ Stage 2 Implementation Verification
   - working override: `TMPDIR=/dev/shm`
   - the trainer now also tries to auto-select a writable temp directory if `TMPDIR` is unset
 
+Stage 2 Runtime / Hardware Notes
+- Windows PowerShell Python environment:
+  - `torch 2.9.1+cpu`
+  - `torch.cuda.is_available() = False`
+  - conclusion: Windows-side training is CPU-only in the current environment
+- WSL Python environment:
+  - `torch 2.10.0+cu128`
+  - `torch.cuda.is_available() = True`
+  - detected GPU: `NVIDIA GeForce RTX 5080 Laptop GPU`
+  - conclusion: Stage 2 GPU training should be run from WSL
+
+Stage 2 GPU Probe
+- Initial WSL CUDA probe with the paper default `batch_size = 4096` failed with CUDA out-of-memory on the RTX 5080 Laptop GPU.
+- Successful WSL CUDA probe:
+  - `python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10_probe_gpu --batch-size 128 --max-train-shards 1 --max-eval-shards 1 --max-train-batches-per-epoch 2 --max-eval-batches 1 --epochs 1 --device cuda`
+- Probe outcome:
+  - completed successfully on CUDA
+  - wrote `artifacts_exact_public/stage2_transformer_eps_10_probe_gpu/stage2_transformer_model.pt`
+  - wrote `artifacts_exact_public/stage2_transformer_eps_10_probe_gpu/training_summary.json`
+  - best epoch: `1`
+  - best threshold: `0.15`
+  - best selection score: `0.3168`
+- Practical training setting on this hardware:
+  - use WSL CUDA
+  - the first successful smoke test used `--batch-size 128`
+  - the current paper-mimicking local setting is `--batch-size 1024 --gradient-accumulation-steps 4`
+
+Stage 2 Local GPU Scaling
+- Additional local WSL CUDA batch-size probes were run after the initial smoke test.
+- Outcomes:
+  - `--batch-size 4096`: crashed the local system
+  - `--batch-size 2048`: crashed the local system
+  - `--batch-size 1024`: passed both a short probe and a longer probe
+- Important paper-vs-current distinction:
+  - paper literal batch size: `4096`
+  - local physical batch size currently validated: `1024`
+  - before the next code change, local training at `1024` did **not** mimic the paper batch size; the optimizer still stepped every `1024` examples
+- Trainer update:
+  - `train_stage2_transformer.py` now supports `--gradient-accumulation-steps`
+  - this allows a local run such as `--batch-size 1024 --gradient-accumulation-steps 4`
+  - effective batch size of that run: `4096`
+  - physical microbatch size remains `1024`
+  - this is the correct way to mimic the paper batch size on the current laptop GPU without fitting all `4096` examples in VRAM at once
+
 Stage 2 Immediate Commands
 - Materialize one epsilon-specific dataset, example `epsilon = 10`:
   - `python3 /mnt/e/fmfstlt/scripts/build_stage2_transformer_dataset.py --epsilon 10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10`
 - Train one Stage 2 Transformer on that dataset:
-  - `python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10`
+  - `python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10 --batch-size 1024 --gradient-accumulation-steps 4 --device cuda`
 - Cheap probe run before full training:
-  - `python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10_probe --max-train-shards 2 --max-eval-shards 1 --max-train-batches-per-epoch 10 --epochs 1`
+  - `python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10_probe_gpu --batch-size 1024 --gradient-accumulation-steps 4 --max-train-shards 1 --max-eval-shards 1 --max-train-batches-per-epoch 2 --max-eval-batches 1 --epochs 1 --device cuda`
 
 Current Next Step
-- Materialize a Stage 2 Transformer dataset for each epsilon of interest.
-- Then train and evaluate one Stage 2 Transformer per epsilon.
+- Completed full WSL CUDA training for `epsilon = 10` with `--batch-size 1024 --gradient-accumulation-steps 4`.
+- Command used:
+  - `time python3 /mnt/e/fmfstlt/scripts/train_stage2_transformer.py --input-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_dataset_eps_10 --output-root /mnt/e/fmfstlt/artifacts_exact_public/stage2_transformer_eps_10_local_gpu_bs1024_acc4 --batch-size 1024 --gradient-accumulation-steps 4 --device cuda`
+- Runtime:
+  - `476m11.300s` wall clock
+- Output:
+  - model: `artifacts_exact_public/stage2_transformer_eps_10_local_gpu_bs1024_acc4/stage2_transformer_model.pt`
+  - summary: `artifacts_exact_public/stage2_transformer_eps_10_local_gpu_bs1024_acc4/training_summary.json`
+- Paper-vs-current distinction for this completed run:
+  - paper literal batch size: `4096`
+  - local physical batch size: `1024`
+  - local gradient accumulation: `4`
+  - effective batch size: `4096`
+- Final selected checkpoint:
+  - best epoch: `3`
+  - best threshold: `0.25`
+  - best validation F1: `0.8696`
+- Final metrics at `epsilon = 10`:
+  - val window F1: `0.8696`, AUROC: `0.9347`, average precision: `0.9420`
+  - val policy within-epsilon rate: `0.6684`, mean savings vs full: `5240.9 ms`
+  - test window F1: `0.8608`, AUROC: `0.9327`, average precision: `0.9363`
+  - test policy within-epsilon rate: `0.6786`, mean savings vs full: `5144.7 ms`
+  - robustness window F1: `0.8565`, AUROC: `0.9305`, average precision: `0.9347`
+  - robustness policy within-epsilon rate: `0.6608`, mean savings vs full: `5245.0 ms`
+- Then materialize and train the remaining epsilon values:
+  - `5, 15, 20, 25, 30, 35`

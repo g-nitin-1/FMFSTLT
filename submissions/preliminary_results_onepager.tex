@@ -1,0 +1,63 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.62in]{geometry}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{document}
+\small
+
+{\Large \textbf{FMFSTLT / TURBOTEST Public-Data Reproduction: Preliminary Results}}\\
+\textbf{Team:} Jithendra (2025MCS2743), Nitin (2025MCS2152)\\
+\textbf{Date:} April 17, 2026\\
+\textbf{GitHub Repo:} \texttt{https://github.com/g-nitin-1/FMFSTLT.git}
+
+\textbf{Objective.} We are reproducing the TURBOTEST pipeline from public M-Lab data using a paper-faithful exact-public rebuild. The current milestone was to complete the Stage 1 throughput regressor, rebuild the Stage 2 stop/continue pipeline to match the paper semantics, and obtain preliminary quantitative results before the full epsilon sweep on GPU.
+
+\textbf{Completed engineering milestones.}
+\begin{itemize}
+\item Rebuilt the exact-public dataset from normalized dense 100 ms tensors with 13 features per bucket.
+\item Completed Stage 1 XGBoost training and full scoring on train/val/test/robustness.
+\item Corrected Stage 2 label semantics to a \emph{permanent-safe suffix oracle} with monotonic post-$t^*$ stop labels.
+\item Rewrote Stage 2 data materialization to use \emph{full-history inputs} and \emph{500 ms decision stride}, instead of the earlier incorrect fixed 2 s window reuse.
+\item Validated the rewritten Stage 2 trainer with smoke/probe runs; WSL CUDA is available on the RTX 5080 laptop GPU and is ready for the full run.
+\end{itemize}
+
+\textbf{Stage 1 quantitative results.} Stage 1 trained on \textbf{20.7M} train windows and \textbf{2.30M} validation windows. The best boosting round was \textbf{1499}, so early stopping did not trigger.
+
+\begin{center}
+\begin{tabular}{|l|r|r|r|r|}
+\hline
+Subset & Count & RMSE & MAE & Mean Rel. Error \\
+\hline
+Train & 20.72M & 47.76 & 19.62 & 0.373 \\
+Val & 2.30M & 52.48 & 19.88 & 0.370 \\
+Test & 1.14M & 46.20 & 18.55 & 0.353 \\
+Robustness & 3.85M & 173.52 & 35.23 & 0.341 \\
+\hline
+\end{tabular}
+\end{center}
+
+These numbers show that the Stage 1 regressor is internally consistent across train/val/test. Robustness RMSE is much larger, which suggests heavier outliers, but the mean relative error remains close to the in-distribution test split.
+
+\textbf{Stage 2 dataset status at $\epsilon = 10\%$.} We have already materialized the paper-faithful Stage 2 dataset using the corrected oracle, full-history sequences, and 500 ms decisions.
+
+\begin{center}
+\begin{tabular}{|l|r|r|r|r|}
+\hline
+Subset & Tests & Decisions & Stop+ Rate & Oracle Stop/Test \\
+\hline
+Train & 717k & 13.45M & 0.537 & 0.796 \\
+Val & 79.7k & 1.50M & 0.537 & 0.796 \\
+Test & 39.9k & 750k & 0.516 & 0.797 \\
+Robustness & 132k & 2.49M & 0.517 & 0.795 \\
+\hline
+\end{tabular}
+\end{center}
+
+This means that under a 10\% tolerance, roughly \textbf{79.6\%} of tests admit a permanent-safe early stop, and about \textbf{51--54\%} of decision points are labeled as safe-to-stop after the oracle transition.
+
+\textbf{Interpretation.} The main result so far is that the reproduction is no longer just infrastructure-complete: Stage 1 is fully trained and scored at scale, and Stage 2 has been corrected to match the paper's intended semantics (monotonic oracle labels, full-history Transformer inputs, and 500 ms decision cadence). The preliminary numbers suggest that the Stage 1 regressor is good enough to support a meaningful Stage 2 early-exit policy study.
+
+\textbf{Immediate next step.} The remaining work is to launch full \textbf{GPU-based Stage 2 training} in WSL CUDA for the epsilon sweep $\{5,10,15,20,25,30,35\}$, then report final stop/continue quality, stopping-time savings, and error under the learned early-exit policy.
+
+\end{document}

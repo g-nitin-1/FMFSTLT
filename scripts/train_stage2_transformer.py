@@ -104,7 +104,16 @@ def parse_args() -> argparse.Namespace:
         "--batch-size",
         type=int,
         default=4096,
-        help="Mini-batch size. Paper default: 4096.",
+        help="Physical mini-batch size loaded per forward/backward pass. Paper default: 4096.",
+    )
+    parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=1,
+        help=(
+            "Number of physical mini-batches to accumulate before each optimizer step. "
+            "Use with --batch-size to emulate a larger effective batch size when VRAM is limited."
+        ),
     )
     parser.add_argument(
         "--learning-rate",
@@ -511,6 +520,7 @@ def train_one_epoch(
     criterion: nn.Module,
     device: torch.device,
     batch_size: int,
+    gradient_accumulation_steps: int,
     rng: np.random.Generator,
     max_batches: int | None,
     clip_grad_norm: float,
@@ -518,17 +528,21 @@ def train_one_epoch(
     model.train()
     total_examples = 0
     total_loss = 0.0
-    batch_count = 0
+    optimizer_step_count = 0
+    microbatch_count = 0
+    pending_microbatches = 0
 
     shuffled_paths = list(paths)
     rng.shuffle(shuffled_paths)
     path_bar = tqdm(shuffled_paths, desc="stage2 train", unit="shard", dynamic_ncols=True)
     stop_early = False
+    optimizer.zero_grad(set_to_none=True)
 
     for path in path_bar:
         path_bar.set_postfix(
             loss=0.0 if total_examples == 0 else total_loss / total_examples,
-            batches=batch_count,
+            batches=optimizer_step_count,
+            microbatches=microbatch_count,
         )
         for batch in iter_decision_batches(
             path,
@@ -542,31 +556,48 @@ def train_one_epoch(
             history_lengths = torch.from_numpy(batch["history_lengths"]).to(device=device, dtype=torch.long)
             targets = torch.from_numpy(batch["labels"]).to(device=device, dtype=torch.float32)
 
-            optimizer.zero_grad(set_to_none=True)
             logits = model(inputs, attention_mask, history_lengths)
             loss = criterion(logits, targets)
-            loss.backward()
-            if clip_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
-            optimizer.step()
+            scaled_loss = loss / gradient_accumulation_steps
+            scaled_loss.backward()
 
             batch_size_current = int(targets.shape[0])
             total_examples += batch_size_current
             total_loss += float(loss.item()) * batch_size_current
-            batch_count += 1
+            microbatch_count += 1
+            pending_microbatches += 1
 
-            if max_batches is not None and batch_count >= max_batches:
-                stop_early = True
-                break
+            should_step = pending_microbatches >= gradient_accumulation_steps
+            if should_step:
+                if clip_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                optimizer_step_count += 1
+                pending_microbatches = 0
+
+                if max_batches is not None and optimizer_step_count >= max_batches:
+                    stop_early = True
+                    break
 
         if stop_early:
             break
+
+    if pending_microbatches > 0 and (max_batches is None or optimizer_step_count < max_batches):
+        if clip_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        optimizer_step_count += 1
 
     path_bar.close()
     return {
         "loss": safe_divide(total_loss, total_examples),
         "examples": total_examples,
-        "batches": batch_count,
+        "batches": optimizer_step_count,
+        "microbatches": microbatch_count,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "effective_batch_size": batch_size * gradient_accumulation_steps,
     }
 
 
@@ -796,6 +827,8 @@ def main() -> None:
         raise SystemExit("--epochs must be positive")
     if args.batch_size <= 0:
         raise SystemExit("--batch-size must be positive")
+    if args.gradient_accumulation_steps <= 0:
+        raise SystemExit("--gradient-accumulation-steps must be positive")
     if args.max_train_batches_per_epoch is not None and args.max_train_batches_per_epoch <= 0:
         raise SystemExit("--max-train-batches-per-epoch must be positive when set")
     if args.max_eval_batches is not None and args.max_eval_batches <= 0:
@@ -872,6 +905,7 @@ def main() -> None:
             criterion=criterion,
             device=device,
             batch_size=args.batch_size,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
             rng=rng,
             max_batches=args.max_train_batches_per_epoch,
             clip_grad_norm=args.clip_grad_norm,
@@ -968,6 +1002,9 @@ def main() -> None:
         "device": str(device),
         "seed": args.seed,
         "pos_weight": pos_weight,
+        "batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "effective_batch_size": args.batch_size * args.gradient_accumulation_steps,
         "best_epoch": best_epoch,
         "best_threshold": best_threshold,
         "best_selection_metric": args.selection_metric,
