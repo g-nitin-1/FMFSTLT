@@ -357,6 +357,20 @@ Completed `epsilon = 10` local WSL CUDA run:
 - final test within-epsilon stop rate: `0.6786`
 - final test mean savings vs full-run decision: `5144.7 ms`
 
+Completed local WSL CUDA epsilon sweep:
+
+- completed runs for `epsilon = 5, 10, 15, 20, 25, 30, 35`
+- all runs used:
+  - physical batch size `1024`
+  - gradient accumulation `4`
+  - effective batch size `4096`
+- the training pipeline itself is stable at this setting, but the current validation threshold-selection method is not yet giving the expected policy frontier across epsilon
+- current behavior:
+  - `epsilon = 10` gives a strong early-stop policy
+  - most other epsilons select very conservative thresholds and therefore emit very few early stops despite respectable window-level classifier quality
+- implication:
+  - the next improvement should target threshold selection / policy calibration, not another pass of model retraining with the same selection rule
+
 If `torch` complains about not finding a usable temp directory in a Linux or WSL shell, set `TMPDIR` before running. The trainer will also try to select a writable temp directory automatically if `TMPDIR` is unset:
 
 ```bash

@@ -1,5 +1,5 @@
 FMFSTLT Progress Note
-Updated: 2026-04-17
+Updated: 2026-05-02
 
 Completed Data Pipeline
 - Built exact public raw shards under `artifacts_exact_public/raw_shards/`.
@@ -233,5 +233,2024 @@ Current Next Step
   - test policy within-epsilon rate: `0.6786`, mean savings vs full: `5144.7 ms`
   - robustness window F1: `0.8565`, AUROC: `0.9305`, average precision: `0.9347`
   - robustness policy within-epsilon rate: `0.6608`, mean savings vs full: `5245.0 ms`
-- Then materialize and train the remaining epsilon values:
-  - `5, 15, 20, 25, 30, 35`
+
+Stage 2 Full Epsilon Sweep
+- Completed full local WSL CUDA builds and training runs for:
+  - `epsilon = 5, 10, 15, 20, 25, 30, 35`
+- All runs used the same paper-mimicking training setup:
+  - physical batch size: `1024`
+  - gradient accumulation: `4`
+  - effective batch size: `4096`
+- Completed output roots:
+  - `artifacts_exact_public/stage2_transformer_eps_5_local_gpu_bs1024_acc4/`
+  - `artifacts_exact_public/stage2_transformer_eps_10_local_gpu_bs1024_acc4/`
+  - `artifacts_exact_public/stage2_transformer_eps_15_local_gpu_bs1024_acc4/`
+  - `artifacts_exact_public/stage2_transformer_eps_20_local_gpu_bs1024_acc4/`
+  - `artifacts_exact_public/stage2_transformer_eps_25_local_gpu_bs1024_acc4/`
+  - `artifacts_exact_public/stage2_transformer_eps_30_local_gpu_bs1024_acc4/`
+  - `artifacts_exact_public/stage2_transformer_eps_35_local_gpu_bs1024_acc4/`
+- Test-set summary snapshot:
+  - `epsilon = 5`: threshold `0.80`, window F1 `0.0180`, emitted-stop rate `0.0019`, within-epsilon rate `0.0002`, mean savings `4.1 ms`
+  - `epsilon = 10`: threshold `0.25`, window F1 `0.8608`, emitted-stop rate `0.8742`, within-epsilon rate `0.6786`, mean savings `5144.7 ms`
+  - `epsilon = 15`: threshold `0.95`, window F1 `0.1425`, emitted-stop rate `0.0006`, within-epsilon rate `0.0004`, mean savings `4.4 ms`
+  - `epsilon = 20`: threshold `0.95`, window F1 `0.3688`, emitted-stop rate `0.0033`, within-epsilon rate `0.0009`, mean savings `23.5 ms`
+  - `epsilon = 25`: threshold `0.85`, window F1 `0.6096`, emitted-stop rate `0.0028`, within-epsilon rate `0.0013`, mean savings `21.7 ms`
+  - `epsilon = 30`: threshold `0.95`, window F1 `0.6918`, emitted-stop rate `0.0231`, within-epsilon rate `0.0103`, mean savings `118.3 ms`
+  - `epsilon = 35`: threshold `0.75`, window F1 `0.8945`, emitted-stop rate `0.0395`, within-epsilon rate `0.0340`, mean savings `243.7 ms`
+- Main observation from the completed sweep:
+  - only `epsilon = 10` gave a strong early-stop policy
+  - all other epsilons showed near-zero within-epsilon rates and near-zero savings
+  - at the time this was attributed to threshold selection; the true cause is documented below
+
+Threshold Sweep and Pareto Frontier
+- Wrote `scripts/rescore_stage2_thresholds.py`:
+  - loads each trained transformer, runs inference on val and test sets
+  - sweeps 99 thresholds (0.01 to 0.99)
+  - records policy-level metrics at each threshold:
+    - emitted_stop_rate, within_epsilon_rate, median/mean savings, median/mean pct data transferred
+  - output: `artifacts_exact_public/stage2_threshold_sweep/threshold_sweep_eps_<N>.json`
+  - combined: `artifacts_exact_public/stage2_threshold_sweep/threshold_sweep_all.json`
+- Wrote `scripts/plot_pareto_frontier.py`:
+  - reads combined sweep JSON
+  - prints summary table of selected operating points
+  - plots sweep curves and Pareto frontier PNG
+  - output: `artifacts_exact_public/stage2_threshold_sweep/`
+- Ran both scripts successfully for all 7 epsilon values
+- Result confirmed: only epsilon=10 shows a valid Pareto tradeoff curve
+- Root cause of failure for other epsilons identified (see below)
+
+CRITICAL BUG: XGBoost Version Mismatch
+- Diagnosis confirmed by direct code inspection and prediction comparison.
+- Stage 1 XGBoost model was trained on Windows PowerShell.
+  - XGBoost version used: 3.2.0 (confirmed from model JSON header: `"version": [3, 2, 0]`)
+- Stage 2 datasets for epsilon = 5, 15, 20, 25, 30, 35 were built on WSL Linux.
+  - XGBoost version on WSL: 3.0.5
+  - XGBoost 3.0.5 cannot correctly load models saved by XGBoost 3.2.0
+  - result: Stage 1 predictions are completely wrong (mean ~ -250 Mbps instead of ~+20 Mbps)
+- Stage 2 dataset for epsilon = 10 was built on Windows PowerShell.
+  - XGBoost version 3.2.0 matched training: predictions are correct
+  - epsilon = 10 dataset and transformer are unaffected and valid
+- Cascade of damage for epsilon = 5, 15, 20, 25, 30, 35:
+  - corrupt Stage 1 predictions -> relative errors of 100x to 17000x
+  - instantaneous_safe = 0 for all decision points
+  - permanent-safe suffix oracle never fires -> stop_label = 0 everywhere
+  - transformer trained on all-zero labels -> learned "never stop"
+  - threshold sweep shows near-zero within_epsilon_rate for all thresholds
+- Verified by:
+  - recomputing Stage 1 predictions on WSL for a known test: got -260 Mbps vs correct +10.6 Mbps
+  - checking oracle_stop_over_tests across epsilon values:
+    - epsilon = 10: 79.65% (correct, built on Windows)
+    - epsilon = 15: 0.08% (wrong, built on WSL)
+    - epsilon = 35: 4.48% (wrong, built on WSL)
+    - expected: rate must increase monotonically with epsilon; the actual values violate this
+
+What is Correct vs Stale
+- CORRECT and usable:
+  - Stage 1 model and all Stage 1 artifacts (trained on Windows)
+  - Stage 1 prediction shards in `stage1_predictions_full_windows/` (scored on Windows)
+  - Stage 2 dataset for epsilon = 10 (`stage2_transformer_dataset_eps_10/`)
+  - Stage 2 transformer for epsilon = 10 (`stage2_transformer_eps_10_local_gpu_bs1024_acc4/`)
+  - Threshold sweep for epsilon = 10 (`stage2_threshold_sweep/threshold_sweep_eps_10.json`)
+- STALE and must be replaced:
+  - Stage 2 datasets for epsilon = 5, 15, 20, 25, 30, 35 (corrupt predictions, wrong labels)
+  - Stage 2 transformers for epsilon = 5, 15, 20, 25, 30, 35 (trained on corrupt data)
+
+Epsilon = 10 Validated Results
+- Threshold sweep on test set shows a smooth Pareto tradeoff curve:
+  - threshold 0.10: within-epsilon rate 59.7%, median savings 7.0s, emitted-stop rate 91.3%
+  - threshold 0.25: within-epsilon rate 67.9%, median savings 6.0s, emitted-stop rate 87.4%
+  - threshold 0.50: within-epsilon rate 75.1%, median savings 4.5s, emitted-stop rate 81.1%
+  - threshold 0.75: within-epsilon rate 78.5%, median savings 2.0s, emitted-stop rate 73.8%
+  - threshold 0.90: within-epsilon rate 79.5%, median savings 0.5s, emitted-stop rate 60.6%
+
+Current Next Step
+- Rebuild Stage 2 datasets for epsilon = 5, 15, 20, 25, 30, 35.
+- Two options (choose one):
+  - Option A (preferred): upgrade XGBoost on WSL to 3.2.0 (`pip install xgboost==3.2.0`),
+    then rebuild datasets on WSL using `build_stage2_transformer_dataset.py`.
+  - Option B: rebuild datasets on Windows PowerShell (already has XGBoost 3.2.0),
+    same commands as epsilon = 10.
+- After rebuilding datasets:
+  - retrain transformers for epsilon = 5, 15, 20, 25, 30, 35 on WSL CUDA
+    (transformer training does not use XGBoost so version does not matter)
+  - re-run threshold sweep (`rescore_stage2_thresholds.py`)
+  - re-run Pareto frontier plot (`plot_pareto_frontier.py`)
+- Alternatively, a patch script can fix existing dataset shards in-place by substituting
+  correct Stage 1 predictions from `stage1_predictions_full_windows/` (avoids full dataset rebuild,
+  but transformer retraining is still required).
+
+Foundation Model Work and Current Project Direction (2026-05-01)
+================================================================
+
+Data Scale Clarification
+------------------------
+- The intended paper-scale interpretation is not "all daily M-Lab data for a continuous 12-month interval".
+- The scale we are using matches the sampled-day style: 12 sampled dates spanning the 12 calendar months from April 2024 through March 2025.
+- Current normalized artifacts:
+  - train source: `800,000` tests from 10 dates
+  - train UUID split: `720,000` train UUIDs and `80,000` validation UUIDs
+  - test source: `40,000` tests from the same 10 dates
+  - robustness source: `133,000` tests from 2 later dates
+  - dates:
+    - train/test months: 2024-04-23, 2024-05-30, 2024-06-16, 2024-07-28, 2024-08-06, 2024-09-26, 2024-10-06, 2024-11-16, 2024-12-14, 2025-01-03
+    - robustness months: 2025-02-06, 2025-03-04
+- Current Stage 2 epsilon=10 dataset:
+  - train: `717,279` tests and `13,450,705` decision points
+  - val: `79,713` tests and `1,495,788` decision points
+  - test: `39,877` tests and `749,908` decision points
+  - robustness: `132,435` tests and `2,486,881` decision points
+- Conclusion:
+  - We are on the same sampled-day/month-span scale intended for this project.
+  - We are not using full continuous daily data for every day in the 12-month period.
+
+Baseline Freeze Decision
+------------------------
+- We stopped rebuilding the full multi-epsilon baseline sweep.
+- Reason:
+  - epsilon=10 Stage 2 dataset and transformer are valid.
+  - epsilon=5,15,20,25,30,35 Stage 2 datasets are stale because they were materialized with an incompatible XGBoost runtime.
+- Current frozen baseline used for comparison:
+  - Stage 1 XGBoost full-window regressor.
+  - Stage 2 Transformer at epsilon=10 only.
+- This is now the baseline anchor for all foundation-model comparisons.
+
+Foundation Model v1 Implemented
+-------------------------------
+- Added shared foundation encoder:
+  - `scripts/foundation_model.py`
+- Added masked-patch pretraining:
+  - `scripts/pretrain_foundation_model.py`
+- Added throughput-regression fine-tuning:
+  - `scripts/train_foundation_throughput_regressor.py`
+- Added epsilon=10 early-stop fine-tuning:
+  - `scripts/train_foundation_early_stop.py`
+- Added speed-tier classification fine-tuning:
+  - `scripts/train_foundation_speed_classifier.py`
+- Added foundation early-stop threshold sweep:
+  - `scripts/rescore_foundation_early_stop_thresholds.py`
+
+Foundation Model v1 Architecture
+--------------------------------
+- Input:
+  - normalized trace tensor: `[100, 13]`
+  - observed bucket mask: `[100]`
+- Patchification:
+  - 5 buckets per patch
+  - `[100, 13] -> [20, 5, 13] -> [20, 65]`
+  - patch is valid if at least one original bucket in the patch was observed
+  - invalid patches are masked in the Transformer
+- Encoder:
+  - CLS token
+  - patch embedding MLP: `65 -> 128 -> 256`
+  - 8-layer Transformer encoder
+  - 8 attention heads
+  - `d_model = 256`
+  - `ff_dim = 1024`
+  - dropout `0.1`
+- Heads implemented:
+  - masked-patch reconstruction head
+  - throughput regression head
+  - epsilon=10 early-stop classifier head
+  - speed-tier classifier head
+
+Foundation Pretraining Results
+------------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_pretrain_masked_patch_v1/`
+- Training scope:
+  - only Stage 1 train UUIDs
+  - `720,000` train examples
+  - no validation/test/robustness leakage
+- Objective:
+  - masked-patch reconstruction
+  - 50% valid patch mask ratio
+- Result:
+  - epoch 1 loss: `0.6103`
+  - epoch 5 loss: `0.4732`
+- Interpretation:
+  - pretraining is stable and learns a useful trace representation.
+
+Foundation Throughput Regression Results
+----------------------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_throughput_regressor_v1/`
+- Best epoch:
+  - `2`
+- Comparison against Stage 1 XGBoost:
+  - val MAE:
+    - XGBoost: `19.88`
+    - foundation: `16.23`
+  - test MAE:
+    - XGBoost: `18.55`
+    - foundation: `14.24`
+  - robustness MAE:
+    - XGBoost: `35.23`
+    - foundation: `38.76`
+  - val RMSE:
+    - XGBoost: `52.48`
+    - foundation: `44.36`
+  - test RMSE:
+    - XGBoost: `46.20`
+    - foundation: `34.04`
+  - robustness RMSE:
+    - XGBoost: `173.52`
+    - foundation: `245.63`
+- Interpretation:
+  - foundation v1 beats Stage 1 XGBoost on val/test throughput prediction.
+  - foundation v1 is worse than XGBoost on robustness throughput prediction.
+
+Foundation Speed-Tier Classification Results
+--------------------------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_speed_classifier_v1/`
+- Best epoch:
+  - `2`
+- Results:
+  - val accuracy: `0.7897`, macro F1: `0.7863`
+  - test accuracy: `0.7653`, macro F1: `0.7706`
+  - robustness accuracy: `0.7610`, macro F1: `0.7634`
+- Interpretation:
+  - speed-tier classification is a valid standalone downstream task.
+  - there is no frozen paper baseline artifact for this task, so it is reported as an added foundation-model capability.
+
+Foundation Early-Stop v1 Results
+--------------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_early_stop_eps_10_v1/`
+- Training:
+  - initialized from masked-patch pretraining
+  - target: frozen epsilon=10 `stop_label`
+  - selected by validation window-level F1
+- Best epoch:
+  - `3`
+- Selected threshold:
+  - `0.05`
+- Comparison against frozen Stage 2 epsilon=10 baseline:
+  - val F1:
+    - baseline: `0.8696`
+    - foundation: `0.8421`
+  - test F1:
+    - baseline: `0.8608`
+    - foundation: `0.8298`
+  - robustness F1:
+    - baseline: `0.8565`
+    - foundation: `0.8314`
+  - val within-epsilon policy rate:
+    - baseline: `0.6684`
+    - foundation: `0.6291`
+  - test within-epsilon policy rate:
+    - baseline: `0.6786`
+    - foundation: `0.6304`
+  - robustness within-epsilon policy rate:
+    - baseline: `0.6608`
+    - foundation: `0.6193`
+  - foundation stops earlier:
+    - val mean stop time: `3664 ms` vs baseline `4141 ms`
+    - test mean stop time: `3682 ms` vs baseline `4258 ms`
+    - robustness mean stop time: `3653 ms` vs baseline `4144 ms`
+- Interpretation:
+  - foundation v1 is more aggressive and saves more time.
+  - but it does not beat the frozen Stage 2 Transformer on F1 or within-epsilon correctness.
+
+Policy-Selected Early-Stop Ablation
+-----------------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_early_stop_eps_10_policy_from_throughput_v1/`
+- Change:
+  - initialized encoder from the throughput-regression checkpoint
+  - selected threshold and epoch by validation `policy_within_epsilon_rate`
+- Best epoch:
+  - `1`
+- Selected threshold:
+  - `0.80`
+- Results:
+  - val within-epsilon rate: `0.800`
+  - test within-epsilon rate: `0.802`
+  - robustness within-epsilon rate: `0.801`
+  - val mean stop time: `8429 ms`
+  - test mean stop time: `8378 ms`
+  - robustness mean stop time: `8427 ms`
+  - val F1: `0.371`
+  - test F1: `0.400`
+  - robustness F1: `0.382`
+- Interpretation:
+  - this ablation can beat the baseline on within-epsilon correctness.
+  - but it waits too long and loses most early-stop savings.
+  - it is a conservative operating point, not the desired main model.
+
+Foundation Early-Stop Threshold Sweeps
+--------------------------------------
+- Artifacts:
+  - `artifacts_exact_public/foundation_early_stop_threshold_sweep/f1_from_pretrain_threshold_sweep.json`
+  - `artifacts_exact_public/foundation_early_stop_threshold_sweep/policy_from_throughput_threshold_sweep.json`
+- We swept thresholds from `0.01` to `0.99`.
+- Best near-baseline operating points:
+  - `f1_from_pretrain`, val:
+    - threshold `0.08`
+    - F1 `0.841`
+    - within-epsilon `0.671`
+    - mean savings `5232 ms`
+  - `f1_from_pretrain`, test:
+    - threshold `0.09`
+    - F1 `0.830`
+    - within-epsilon `0.682`
+    - mean savings `5105 ms`
+  - `f1_from_pretrain`, robustness:
+    - threshold `0.09`
+    - F1 `0.833`
+    - within-epsilon `0.670`
+    - mean savings `5098 ms`
+- Baseline reference:
+  - val within-epsilon `0.668`, mean savings `5241 ms`
+  - test within-epsilon `0.679`, mean savings `5145 ms`
+  - robustness within-epsilon `0.661`, mean savings `5245 ms`
+- Interpretation:
+  - threshold sweep makes foundation early-stop competitive.
+  - but no foundation checkpoint strictly dominates the frozen Stage 2 baseline on both within-epsilon rate and time savings.
+
+Why Foundation v1 Did Not Beat Stage 2
+--------------------------------------
+- Stage 2 baseline uses a very direct supervised signal:
+  - Stage 1 prediction at every decision point
+  - relative error at every decision point
+  - permanent-safe suffix oracle labels
+  - full-history prefix at the decision point
+- Foundation v1 early-stop head does not explicitly model Stage 1-like prefix throughput prediction inside the stopping decision.
+- Foundation v1 uses a single CLS embedding for each prefix and a BCE stop head.
+- That makes it a useful representation learner, but the early-stop head is not structurally aligned with the policy:
+  - it is not forced to predict throughput at every decision
+  - it is not forced to estimate uncertainty/confidence
+  - it is not trained with a direct cost for "stop wrong" vs "wait too long"
+- Therefore:
+  - throughput head can beat Stage 1 XGBoost on val/test
+  - early-stop head can become competitive after threshold sweep
+  - but it does not reliably beat Stage 2's specialized decision policy
+- Separate robustness issue:
+  - foundation v1 throughput robustness MAE/RMSE is worse than XGBoost:
+    - XGBoost robustness MAE/RMSE: `35.23` / `173.52`
+    - foundation robustness MAE/RMSE: `38.76` / `245.63`
+  - this is the main weakness in the v1 result.
+  - val/test gains are real, but robustness is the time-shifted Feb-Mar 2025 holdout.
+  - adding more capacity alone can make this worse, so the next model must include explicit regularization or augmentation.
+- Separate threshold issue:
+  - v1 early-stop becomes competitive only after threshold sweep.
+  - the policy-selected ablation gets high within-epsilon correctness by waiting too long.
+  - v2 should aim for calibrated stop probabilities where threshold `0.50` is meaningful.
+  - threshold sweeps will still be reported as secondary Pareto analysis, but the primary model should not depend on a fragile threshold search to look good.
+
+Foundation v1.5 Gate Before Full v2
+-----------------------------------
+- Do not jump directly into a large redesign unless the cheap intermediate test fails.
+- v1.5 hypothesis:
+  - v1 lost Stage 2 mostly because the stop head was not jointly trained with per-decision throughput and uncertainty.
+  - if that is true, adding per-decision auxiliary heads to the current patch encoder should close much of the early-stop gap.
+- v1.5 architecture:
+  - keep the existing patch encoder scale:
+    - patch size: `5` buckets
+    - 20 decision-aligned patch tokens
+    - `d_model = 256`
+    - 8 heads
+    - 8 layers
+  - remove dependence on only one CLS output for early stopping.
+  - produce an output for every decision index `d in 0..19`.
+  - decision `d` corresponds to buckets `[0, 5d+4]`.
+  - train heads at every decision:
+    - prefix throughput mean head
+    - prefix throughput uncertainty head
+    - stop logit head
+    - optional speed-tier head from the final pooled representation
+- v1.5 causality:
+  - use a causal attention mask over the 20 patch tokens.
+  - decision token `d` cannot attend to patch tokens `> d`.
+  - this prevents future-patch leakage while allowing one forward pass for all 20 decisions.
+- v1.5 evaluation purpose:
+  - if v1.5 beats or matches Stage 2 epsilon=10, full v2 may be unnecessary.
+  - if v1.5 still loses Stage 2, full v2 is justified because the failure is likely in the representation and temporal aggregation, not only the head design.
+
+Foundation Model v2 Proposal
+----------------------------
+- Goal:
+  - one foundation model that beats Stage 1 throughput prediction and Stage 2 early-stopping policy.
+  - it must also address the v1 robustness regression.
+- Core idea:
+  - move from a single CLS-per-prefix classifier to an all-decision causal multi-task sequence model.
+  - train throughput, uncertainty, and stop behavior at every decision point.
+- Input:
+  - normalized trace tensor: `[100, 13]`
+  - observed bucket mask: `[100]`
+  - no validation/test/robustness examples used during pretraining or training.
+- Bucket-level stem:
+  - chosen design: causal 1D convolution over bucket tokens.
+  - channels:
+    - input: `13`
+    - hidden/output: `128`
+  - kernel size: `5`
+  - stride: `1`
+  - padding: left-only causal padding, no right padding.
+  - activation: GELU.
+  - normalization: LayerNorm after channel projection.
+  - dropout: `0.15`.
+  - causality rule:
+    - bucket representation at time `t` can use buckets `<= t` only.
+    - it must not use buckets `> t`.
+  - reason:
+    - local temporal mixing is useful, but bidirectional bucket attention before decision aggregation would leak future information.
+- Decision-token aggregation:
+  - chosen design: end-bucket representation.
+  - decision token `d` is the causal bucket representation at bucket `5d+4`.
+  - this exactly matches Stage 2 decision timing.
+  - no mean pooling across future buckets is allowed.
+  - optional later ablation:
+    - concatenate a causal mean over buckets `[5d, 5d+4]`.
+    - this is not part of the first v2 implementation.
+- Decision Transformer:
+  - input tokens: 20 decision tokens.
+  - causal mask:
+    - decision `d` attends only to decisions `<= d`.
+  - initial configuration:
+    - `d_model = 256`
+    - `num_heads = 8`
+    - `num_layers = 6`
+    - `ff_dim = 1024`
+    - dropout `0.15`
+  - reason for 6 layers:
+    - v1 used 8 layers and already overfit robustness.
+    - v2 starts slightly smaller with stronger regularization.
+- Heads:
+  - prefix throughput mean head:
+    - predicts log throughput at every decision.
+  - prefix throughput uncertainty head:
+    - predicts log variance at every decision.
+  - stop-policy head:
+    - predicts stop probability at every decision.
+  - full-trace throughput head:
+    - uses decision token 19 to report Stage 1-comparable throughput metrics.
+  - speed-tier head:
+    - uses decision token 19 for downstream speed-grade classification.
+- Uncertainty formulation:
+  - chosen design: heteroscedastic Gaussian negative log likelihood on log throughput.
+  - for each supervised decision:
+    - model predicts `mu_d` and `log_var_d`
+    - target is `log1p(y_true_mbps)`
+    - loss is `0.5 * exp(-log_var_d) * (target - mu_d)^2 + 0.5 * log_var_d`
+  - reason:
+    - uncertainty becomes directly tied to throughput error, and the stop head can learn to avoid low-confidence early stops.
+- Stop and policy losses:
+  - base stop loss:
+    - weighted BCE between predicted stop probability and frozen epsilon=10 `stop_label[d]`.
+  - policy cost term:
+    - define `safe_d := instantaneous_safe_window[d]` from the epsilon=10 Stage 2 dataset.
+    - define `p_stop_d` as predicted stop probability.
+    - define `elapsed_norm_d = (5d+5) / 100`, the fraction of the 10-second trace consumed.
+    - `wrong_stop_cost = p_stop_d * (1 - safe_d)`
+    - `wait_cost = (1 - p_stop_d) * safe_d * elapsed_norm_d`
+    - `policy_loss = lambda_wrong * wrong_stop_cost + lambda_wait * wait_cost`
+  - important semantic distinction:
+    - `stop_label[d] = 1` means decision `d` is at or after the permanent-safe suffix oracle point.
+    - `instantaneous_safe_window[d] = 1` means decision `d` is safe at that decision only.
+    - therefore a decision can be instantaneously safe but still have `stop_label[d] = 0`.
+    - this is intentional: BCE preserves the conservative suffix-oracle target, while policy loss teaches calibration around instantaneous safety and waiting cost.
+  - initial weights:
+    - `lambda_wrong = 2.0`
+    - `lambda_wait = 0.2`
+  - reason:
+    - stopping when unsafe is much worse than waiting one more decision.
+    - waiting too long is still penalized so the model does not become the conservative policy-selected v1 ablation.
+- Multi-task loss weighting:
+  - first implementation uses fixed weights, not GradNorm or learned task weights.
+  - initial total loss:
+    - prefix throughput NLL: `1.0`
+    - full-trace throughput NLL: `0.5`
+    - stop BCE: `1.0`
+    - policy cost: `0.5`
+    - speed-tier cross entropy: `0.2`
+  - reason:
+    - fixed weights make the first result interpretable.
+    - adaptive loss balancing can be a later ablation if the fixed-weight model is unstable.
+- Robustness regularization:
+  - dropout increased from v1 `0.10` to `0.15`.
+  - AdamW weight decay: `0.02`.
+  - optimizer change is deliberate:
+    - v1 used Adam with no weight decay.
+    - v2 uses AdamW so weight decay is decoupled from gradient scaling.
+  - valid patch/decision dropout during training:
+    - randomly drop 10% of valid decision tokens from attention.
+    - never drop all valid context for a sample.
+  - bucket feature dropout during training:
+    - randomly zero 5% of observed bucket vectors before the causal stem.
+    - this happens after train-only normalization, so zero means normalized mean-substitution, not raw feature zero.
+    - keep the observed bucket mask unchanged so the model learns missing/noisy measurements.
+  - date/tier balance:
+    - keep shard-level shuffling.
+    - if robustness remains weak, add date-balanced sampling as the next ablation.
+- Evaluation protocol:
+  - primary early-stop report:
+    - threshold fixed at `0.50`.
+    - this tests whether the policy head is calibrated.
+  - secondary early-stop report:
+    - sweep thresholds from `0.01` to `0.99`.
+    - report Pareto frontier against frozen Stage 2 epsilon=10.
+  - Stage 1 comparison:
+    - report val/test/robustness MAE and RMSE against frozen XGBoost.
+    - throughput metrics are computed in Mbps after applying `expm1(mu)` to log-throughput predictions.
+  - Stage 2 comparison:
+    - report window F1, within-epsilon policy rate, emitted-stop rate, mean/median stop time, and mean/median savings.
+- Success criteria:
+  - Stage 1:
+    - beat XGBoost val/test MAE.
+    - robustness MAE must improve over v1, and ideally beat XGBoost.
+  - Stage 2:
+    - at threshold `0.50`, match Stage 2 within-epsilon rate within `0.005` while improving mean savings by at least `250 ms`, or
+    - on the threshold sweep, strictly dominate Stage 2 at one operating point with same-or-better within-epsilon rate and same-or-better savings.
+  - Robustness guardrail:
+    - do not accept a model that improves val/test but worsens robustness relative to v1.
+
+Proposed Next Implementation Step
+---------------------------------
+- Next code target is v1.5, not full v2.
+- Implement `scripts/foundation_model_v15.py` or extend `scripts/foundation_model.py` with:
+  - causal patch-token mode
+  - per-decision throughput mean head
+  - per-decision throughput uncertainty head
+  - per-decision stop head
+- Implement `scripts/train_foundation_v15_multitask.py`:
+  - input:
+    - valid epsilon=10 Stage 2 dataset
+  - supervised targets:
+    - `y_true_mbps`
+    - `stop_label`
+    - instantaneous correctness/safety target derived from `relative_error`
+    - `speed_tier`
+  - output:
+    - Stage 1-comparable throughput metrics
+    - Stage 2-comparable early-stop policy metrics
+    - robustness metrics
+- Run v1.5 for 5 epochs first.
+- If v1.5 closes the Stage 2 gap, keep the simpler architecture and report it.
+- If v1.5 does not close the Stage 2 gap, implement the full v2 causal bucket-stem model described above.
+
+Foundation v1.5 Implementation Status
+-------------------------------------
+- Implemented `scripts/foundation_model_v15.py`.
+  - causal 20-token patch encoder
+  - no CLS dependency for early stopping
+  - per-decision throughput mean head
+  - per-decision throughput uncertainty head
+  - per-decision stop head
+  - final throughput head
+  - speed-tier head
+- Implemented `scripts/train_foundation_v15_multitask.py`.
+  - trains one full test at a time and emits all valid decision outputs in one forward pass.
+  - initializes compatible encoder weights from the existing v1 masked-patch checkpoint.
+  - trains prefix throughput NLL, final throughput NLL, stop BCE, policy cost, and speed-tier CE together.
+  - computes Stage 1 MAE/RMSE after `expm1(mu)` in Mbps.
+  - computes early-stop policy metrics using the foundation model's own prefix throughput prediction at the selected stop.
+  - reports both fixed threshold `0.50` and tuned-threshold metrics.
+- Probe completed successfully:
+  - output root: `artifacts_exact_public/foundation_v15_multitask_eps_10_probe/`
+  - command used one train shard, one eval shard, one optimizer step, CPU device.
+  - purpose was shape/import/masking validation only, not a meaningful result.
+- Probe fix made:
+  - causal attention plus key-padding can produce NaNs when a query has no valid previous keys.
+  - v1.5 now zeroes invalid patch tokens instead of key-padding them inside the causal Transformer.
+  - causal masking still prevents future leakage.
+- Next run:
+  - run a CUDA probe with larger batch size.
+  - if clean, run the full 5-epoch v1.5 experiment.
+
+Foundation v1.5 Full Result
+---------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_v15_multitask_eps_10/`
+- Runtime:
+  - 5 epochs completed locally on CUDA in about `16m45s`.
+- Best epoch under default selection:
+  - epoch `5`
+  - tuned threshold `0.40`
+- Throughput result:
+  - val MAE/RMSE: `75.69` / `132.81`
+  - test MAE/RMSE: `64.03` / `117.35`
+  - robustness MAE/RMSE: `104.73` / `370.04`
+- Early-stop result using the model's own prefix throughput predictions:
+  - fixed threshold `0.50`:
+    - val F1 `0.829`, within-epsilon `0.164`, mean savings `4825 ms`
+    - test F1 `0.817`, within-epsilon `0.258`, mean savings `4644 ms`
+    - robustness F1 `0.819`, within-epsilon `0.226`, mean savings `4735 ms`
+  - tuned threshold `0.40`:
+    - val F1 `0.832`, within-epsilon `0.160`, mean savings `5193 ms`
+    - test F1 `0.820`, within-epsilon `0.250`, mean savings `5068 ms`
+    - robustness F1 `0.821`, within-epsilon `0.220`, mean savings `5135 ms`
+- Interpretation:
+  - v1.5 learned a reasonable stop-label ranking, but it failed the project objective.
+  - throughput prediction collapsed relative to both Stage 1 XGBoost and foundation v1 throughput.
+  - because policy metrics are computed using the foundation model's own prefix throughput prediction, the bad throughput head causes very low within-epsilon rates.
+  - this means v1.5 does not close the Stage 2 gap and is not reportable as the final model.
+- Important detail:
+  - default F1 selection chose epoch 5.
+  - validation throughput was best around epoch 3, but even there val MAE was about `28.82`, still worse than foundation v1 throughput and not enough to fix policy correctness.
+
+Foundation v1.5b Next Fix
+-------------------------
+- Do not move to full v2 yet.
+- First run a cheaper v1.5b:
+  - initialize the encoder from `foundation_throughput_regressor_v1/foundation_throughput_model.pt`.
+  - also copy the trained v1 throughput regression head into the v1.5 prefix/final throughput mean heads.
+  - select epoch by policy behavior instead of only window F1.
+- Code support added:
+  - `--init-throughput-heads` in `scripts/train_foundation_v15_multitask.py`.
+  - this copies compatible v1 throughput head weights into v1.5 throughput mean heads when the checkpoint is a throughput-regression checkpoint.
+- Hypothesis:
+  - if the v1.5 failure is mainly bad throughput initialization/forgetting, v1.5b should preserve Stage 1 performance much better.
+  - if v1.5b still has poor within-epsilon policy correctness, then the full v2 causal bucket-stem model is justified.
+
+Foundation v1.5b Result
+-----------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_v15b_multitask_eps_10_from_throughput/`
+- Change:
+  - initialized from `foundation_throughput_regressor_v1/foundation_throughput_model.pt`
+  - copied the trained v1 throughput head into v1.5 prefix/final throughput heads
+  - selected by validation `policy_within_epsilon_rate`
+  - learning rate lowered to `5e-5`
+- Result:
+  - best epoch: `5`
+  - tuned threshold: `0.40`
+  - val throughput MAE/RMSE: `43.43` / `98.97`
+  - test throughput MAE/RMSE: `37.05` / `85.82`
+  - robustness throughput MAE/RMSE: `73.18` / `345.47`
+  - fixed threshold `0.50`:
+    - val F1 `0.824`, within-epsilon `0.281`, mean savings `4876 ms`
+    - test F1 `0.810`, within-epsilon `0.359`, mean savings `4710 ms`
+    - robustness F1 `0.812`, within-epsilon `0.331`, mean savings `4809 ms`
+  - tuned threshold `0.40`:
+    - val F1 `0.826`, within-epsilon `0.257`, mean savings `5282 ms`
+    - test F1 `0.812`, within-epsilon `0.330`, mean savings `5177 ms`
+    - robustness F1 `0.810`, within-epsilon `0.306`, mean savings `5287 ms`
+- Interpretation:
+  - v1.5b improves over v1.5, especially throughput and within-epsilon policy correctness.
+  - it still does not approach the frozen Stage 2 epsilon=10 baseline:
+    - baseline test within-epsilon `0.679`, mean savings `5145 ms`
+    - v1.5b tuned test within-epsilon `0.330`, mean savings `5177 ms`
+  - the failure is not just bad initialization.
+- Root cause now clearer:
+  - v1.5/v1.5b trains stop BCE against XGBoost-derived `stop_label`.
+  - evaluation uses the foundation model's own prefix throughput prediction to decide whether a stop is within epsilon.
+  - therefore the supervised stop target and deployed foundation policy semantics are misaligned.
+
+Foundation v1.6 Aligned-Policy Patch
+------------------------------------
+- Added trainer options to align training with foundation-model evaluation:
+  - `--stop-target-source`
+    - `stop_label`
+    - `instantaneous_safe_window`
+    - `model_instant_safe`
+    - `model_suffix_safe`
+  - `--policy-safety-source`
+    - `dataset`
+    - `model_prediction`
+- For `model_*` stop targets:
+  - safety is recomputed from detached foundation throughput predictions.
+  - `model_suffix_safe` mimics the permanent-safe suffix oracle using the foundation model's own predicted throughput.
+- For `--policy-safety-source model_prediction`:
+  - the policy cost penalizes stop/wait behavior using model-predicted safety, not XGBoost-derived safety.
+- Probe completed:
+  - `artifacts_exact_public/foundation_v16_aligned_policy_probe/`
+  - dynamic target path works.
+- Next run:
+  - run v1.6 with throughput checkpoint initialization, `model_suffix_safe`, and `model_prediction`.
+  - use throughput-heavy weights so prefix throughput does not collapse while the stop head learns model-aligned safety.
+
+Foundation v1.6 Aligned-Policy Result
+-------------------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_v16_aligned_policy_eps_10_from_throughput/`
+- Change:
+  - initialized from foundation v1 throughput checkpoint
+  - copied throughput heads
+  - stop target source: `model_suffix_safe`
+  - policy safety source: `model_prediction`
+  - throughput-heavy weights:
+    - prefix throughput `3.0`
+    - full throughput `1.0`
+    - stop BCE `0.5`
+    - policy `1.0`
+    - speed `0.0`
+- Result:
+  - best epoch: `2`
+  - tuned threshold: `0.90`
+  - val throughput MAE/RMSE: `27.40` / `80.12`
+  - test throughput MAE/RMSE: `23.96` / `69.02`
+  - robustness throughput MAE/RMSE: `51.58` / `276.71`
+  - tuned threshold `0.90`:
+    - val F1 `0.000`, within-epsilon `0.692`, mean savings `0 ms`
+    - test F1 `0.000`, within-epsilon `0.700`, mean savings `0 ms`
+    - robustness F1 `0.000`, within-epsilon `0.701`, mean savings `0 ms`
+  - fixed threshold `0.50`:
+    - emitted-stop rate is almost zero
+    - mean savings is only a few milliseconds
+- Interpretation:
+  - v1.6 confirms the aligned-safety idea can recover high within-epsilon correctness.
+  - but selecting only `policy_within_epsilon_rate` collapses to the trivial "never stop" policy.
+  - the model wins correctness by waiting until the full trace, so it is not an early-stop model.
+  - this is not a model-capacity result; it is an objective/selection failure.
+
+Foundation v1.6b Utility Selection Patch
+----------------------------------------
+- Added utility-based selection metrics to `scripts/train_foundation_v15_multitask.py`:
+  - `policy_correct_savings_score`
+    - score = within-epsilon rate times normalized mean savings.
+  - `policy_constrained_savings_score`
+    - requires within-epsilon rate above `--min-within-epsilon-rate`.
+    - among feasible thresholds, maximizes mean savings.
+    - infeasible thresholds are ranked by how close they get to the constraint.
+- Added arguments:
+  - `--min-within-epsilon-rate`
+  - `--savings-score-scale-ms`
+- Probe completed:
+  - `artifacts_exact_public/foundation_v16_utility_probe/`
+  - confirms the constrained-savings metric path works.
+- Next run:
+  - rerun aligned-policy training with `policy_constrained_savings_score`.
+  - set `--min-within-epsilon-rate 0.66`, matching the frozen Stage 2 epsilon=10 robustness/val/test scale.
+  - increase waiting pressure (`lambda_wait`) so the model cannot satisfy training by waiting until the end.
+
+Foundation v1.6b Utility Result
+-------------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_v16b_utility_eps_10_from_throughput/`
+- Change:
+  - selected by `policy_constrained_savings_score`
+  - required validation within-epsilon rate at least `0.66`
+  - `lambda_wait = 2.0`
+- Result:
+  - best epoch: `2`
+  - tuned threshold: `0.47`
+  - val throughput MAE/RMSE: `20.09` / `76.61`
+  - test throughput MAE/RMSE: `17.93` / `65.77`
+  - robustness throughput MAE/RMSE: `44.51` / `271.91`
+  - tuned threshold:
+    - val F1 `0.000`, within-epsilon `0.689`, mean savings `3.4 ms`, emitted-stop rate `0.001`
+    - test F1 `0.000`, within-epsilon `0.694`, mean savings `2.8 ms`, emitted-stop rate `0.000`
+    - robustness F1 `0.000`, within-epsilon `0.696`, mean savings `3.9 ms`, emitted-stop rate `0.001`
+- Interpretation:
+  - v1.6b improves throughput substantially:
+    - test MAE `17.93`, now close to XGBoost `18.55` but still worse than foundation v1 throughput `14.24`.
+  - correctness stays high because the policy almost never stops early.
+  - constrained threshold selection alone is not enough because stop probabilities remain too low.
+- New failure mode:
+  - the policy loss still permits a low-stop-probability solution.
+  - waiting pressure alone does not create enough gradient to emit stops at early safe prefixes.
+
+Foundation v1.6c Safe-Stop Reward Patch
+---------------------------------------
+- Added `--lambda-safe-stop`.
+- New policy term:
+  - `safe_stop_reward = -log(p_stop) * safe * (1 - elapsed_norm)`
+  - this pushes stop probability up when the model says the prefix is safe.
+  - the `(1 - elapsed_norm)` factor rewards earlier safe stops more than late safe stops.
+- Purpose:
+  - prevent the no-stop collapse observed in v1.6 and v1.6b.
+  - keep `lambda_wrong` active so unsafe stops are still penalized.
+- Next run:
+  - use v1.6b settings plus `--lambda-safe-stop`.
+  - lower `lambda_wait` slightly if needed, because safe-stop reward now provides the main early-stop pressure.
+
+Foundation v1.6c Safe-Stop Result
+---------------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_v16c_safe_stop_eps_10_from_throughput/`
+- Change:
+  - added `--lambda-safe-stop 1.0`
+  - used `lambda_wait = 1.0`
+  - still used `model_suffix_safe`
+- Result:
+  - best epoch: `2`
+  - tuned threshold: `0.84`
+  - val throughput MAE/RMSE: `28.09` / `80.76`
+  - test throughput MAE/RMSE: `24.49` / `69.64`
+  - robustness throughput MAE/RMSE: `51.97` / `275.20`
+  - tuned threshold:
+    - val F1 `0.000`, within-epsilon `0.593`, mean savings `0 ms`, emitted-stop rate `0.000`
+    - test F1 `0.000`, within-epsilon `0.623`, mean savings `0 ms`, emitted-stop rate `0.000`
+    - robustness F1 `0.000`, within-epsilon `0.614`, mean savings `0.1 ms`, emitted-stop rate `0.000`
+- Interpretation:
+  - safe-stop reward did not fix the no-stop collapse.
+  - it also reduced within-epsilon correctness relative to v1.6b.
+  - the issue is likely the suffix target:
+    - `model_suffix_safe` requires all later model predictions to stay safe.
+    - the deployed policy metric only checks whether the selected stop is instantaneously within epsilon.
+    - therefore suffix supervision is too conservative for the metric we are optimizing.
+
+Uncertainty-Policy Probe
+------------------------
+- Implemented `scripts/rescore_foundation_v15_uncertainty_policy.py`.
+- Policy:
+  - confidence = `exp(-sqrt(exp(log_var)))`
+  - stop when confidence exceeds a threshold.
+- Probe:
+  - model: v1.6b
+  - one shard per subset
+  - output: `artifacts_exact_public/foundation_v15_uncertainty_threshold_sweep_probe/v16b_probe_uncertainty_threshold_sweep.json`
+- Probe result:
+  - confidence did not separate safe from unsafe prefixes well.
+  - best one-shard within-epsilon rates were only about `0.13-0.15` at high savings.
+- Interpretation:
+  - the heteroscedastic uncertainty head is not currently calibrated enough to use as the stopping policy.
+
+Foundation v1.6d Instant-Safe Target
+------------------------------------
+- Next targeted run:
+  - switch stop target from `model_suffix_safe` to `model_instant_safe`.
+- Reason:
+  - the reported policy metric is instantaneous correctness at the selected stop.
+  - `model_instant_safe` directly trains the stop head to identify prefixes where the foundation throughput prediction is currently within epsilon.
+  - this is less conservative than suffix safety and should give the model a usable early-stop signal.
+- Keep:
+  - throughput checkpoint initialization
+  - throughput-heavy loss weights
+  - model-prediction policy safety
+  - constrained-savings threshold selection
+- Success condition:
+  - emitted-stop rate must be nontrivial.
+  - within-epsilon should stay near `0.66`.
+  - mean savings should move from near `0 ms` toward the Stage 2 baseline range.
+
+Foundation v1.6d Instant-Safe Result
+------------------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_v16d_instant_safe_eps_10_from_throughput/`
+- Change:
+  - stop target source: `model_instant_safe`
+  - policy safety source: `model_prediction`
+- Result:
+  - best epoch: `2`
+  - tuned threshold: `0.48`
+  - val throughput MAE/RMSE: `22.42` / `79.30`
+  - test throughput MAE/RMSE: `19.83` / `68.23`
+  - robustness throughput MAE/RMSE: `47.67` / `280.81`
+  - tuned threshold:
+    - val F1 `0.000`, within-epsilon `0.693`, mean savings `0.7 ms`, emitted-stop rate `0.000`
+    - test F1 `0.000`, within-epsilon `0.700`, mean savings `0.4 ms`, emitted-stop rate `0.000`
+    - robustness F1 `0.000`, within-epsilon `0.699`, mean savings `1.8 ms`, emitted-stop rate `0.000`
+- Interpretation:
+  - instant-safe target also collapses to no-stop.
+  - the v1.x learned stop-head line is no longer worth tuning:
+    - `stop_label` target emits stops but is inaccurate.
+    - `model_suffix_safe` and `model_instant_safe` preserve correctness by not stopping.
+  - next step should test direct policies from the throughput predictions before implementing full v2.
+
+Direct Prefix-Error Policy Probe
+--------------------------------
+- Implemented `scripts/rescore_foundation_v15_direct_error_policy.py`.
+- Policy:
+  - ignore the learned stop logit.
+  - use the foundation model's prefix throughput prediction directly.
+  - stop after `patience` consecutive decisions where model relative error is below a threshold.
+- Important correction:
+  - this policy is an oracle diagnostic, not a deployable policy.
+  - it uses `y_true_mbps` to compute relative error at each prefix.
+  - `y_true_mbps` is not available to a real early-stop policy before the test finishes.
+  - therefore this result must not be reported as a valid model comparison.
+  - the script now requires `--allow-oracle-policy` to run.
+- Probe:
+  - checkpoint: v1.6b
+  - one shard per subset
+  - output: `artifacts_exact_public/foundation_v15_direct_error_policy_probe/v16b_probe_direct_error_policy.json`
+- Probe result:
+  - patience `1`, error threshold `0.50`:
+    - val within-epsilon `0.561`, mean savings `4003 ms`, emitted-stop rate `0.561`
+    - test within-epsilon `0.574`, mean savings `4091 ms`, emitted-stop rate `0.574`
+    - robustness within-epsilon `0.644`, mean savings `4504 ms`, emitted-stop rate `0.644`
+- Interpretation:
+  - this diagnostic explains that good early stopping would be possible if the policy knew true prefix error.
+  - because it uses ground truth, it is only an upper-bound/debugging tool.
+  - the valid next step is a deployable rule based on prefix prediction stability or calibrated uncertainty, not true error.
+
+Deployable Stability-Policy Probe
+---------------------------------
+- Implemented `scripts/rescore_foundation_v15_stability_policy.py`.
+- Policy:
+  - uses only foundation prefix throughput predictions.
+  - computes prediction stability between consecutive decisions.
+  - stops after `patience` consecutive stable transitions.
+  - does not use `y_true_mbps` for deciding when to stop.
+- Probe:
+  - checkpoint: v1.6b
+  - one shard per subset
+  - output: `artifacts_exact_public/foundation_v15_stability_policy_probe/v16b_probe_stability_policy.json`
+- Probe result:
+  - best one-shard val within-epsilon about `0.10`, savings about `5166 ms`
+  - best one-shard test within-epsilon about `0.105`, savings about `5028 ms`
+  - best one-shard robustness within-epsilon about `0.112`, savings about `5427 ms`
+- Interpretation:
+  - deployable stability stopping emits real early stops.
+  - but its correctness is far below the frozen Stage 2 baseline.
+  - this suggests the v1.x patch encoder/prefix-throughput path is not accurate enough at early prefixes to support a simple rule-based policy.
+
+Decision After v1.x Experiments
+-------------------------------
+- Stop spending time on v1.x stop-head tuning.
+- Summary:
+  - v1 throughput head is a strong Stage 1 alternative on val/test.
+  - v1/v1.5 stop-label heads can mimic window labels but do not produce accurate foundation-policy stops.
+  - model-aligned safety heads avoid bad stops by not stopping.
+  - uncertainty-only and stability-only deployable policies are not accurate enough.
+- Next architecture direction:
+  - implement full v2 causal bucket-stem model as originally proposed.
+  - keep per-decision throughput as the central supervised task.
+  - add a policy head only after prefix throughput is accurate enough at early decisions.
+  - evaluate prefix-throughput MAE by decision index before trusting any early-stop head.
+
+Foundation v2 Implementation Start
+----------------------------------
+- Implemented `scripts/foundation_model_v2.py`.
+- Architecture:
+  - input remains normalized `x_full` with shape `[batch, 100, 13]` plus `bucket_mask`.
+  - invalid buckets are zeroed after train-only normalization.
+  - a causal 1D bucket stem uses left padding only, so bucket `t` cannot see buckets after `t`.
+  - decision tokens are taken from end buckets `4, 9, ..., 99`, matching the 20 Stage 2 decision times.
+  - a causal decision-token Transformer processes the 20 decision tokens.
+  - output heads predict per-decision log-throughput mean/log-variance, stop logits, final throughput, and speed tier.
+- Implemented `scripts/train_foundation_v2_multitask.py`.
+- First v2 training mode is intentionally throughput-focused:
+  - `prefix_throughput_weight = 3.0`
+  - `full_throughput_weight = 1.0`
+  - `stop_bce_weight = 0.0`
+  - `policy_weight = 0.0`
+  - `speed_weight = 0.0`
+  - epoch selection uses validation `throughput_mae`
+- Reason:
+  - v1.x showed that stop heads are not useful until early-prefix throughput predictions are accurate.
+  - v2 must first prove better per-decision throughput quality before policy tuning.
+- Sanity probe:
+  - command used one train batch and one eval batch on CPU.
+  - output: `artifacts_exact_public/foundation_v2_causal_bucket_eps_10_probe/`
+  - train batches: `1`
+  - train tests: `16`
+  - validation probe MAE/RMSE: `5.02` / `7.52` over `32` tests
+  - test probe MAE/RMSE: `4.29` / `7.50` over `32` tests
+  - robustness probe MAE/RMSE: `5.88` / `8.59` over `32` tests
+- Interpretation:
+  - the v2 code path runs end-to-end and writes a valid checkpoint/summary.
+  - these probe metrics are not meaningful performance results because they use only one mini-batch.
+  - next run should be the full CUDA throughput-focused v2 training.
+
+Foundation v2 Throughput-Focused Result
+---------------------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_v2_causal_bucket_throughput_eps_10/`
+- Training:
+  - full CUDA run completed in about `16m35s`.
+  - best epoch selected by validation `throughput_mae`: epoch `5`.
+  - loss used heteroscedastic NLL only:
+    - prefix throughput weight `3.0`
+    - full throughput weight `1.0`
+    - stop/policy/speed weights `0.0`
+- Final full-test throughput head:
+  - val MAE/RMSE: `22.45` / `52.10`
+  - test MAE/RMSE: `19.69` / `42.12`
+  - robustness MAE/RMSE: `46.61` / `267.24`
+- Interpretation:
+  - v2 does not beat the v1 throughput regressor on val/test/robustness.
+  - v2 does not beat XGBoost on MAE.
+  - v2 is roughly competitive with XGBoost RMSE on val/test, but not enough to use as the primary Stage 1 result.
+  - stop-policy metrics from this run are not meaningful because stop/policy losses were disabled.
+
+Foundation v2 Prefix-Throughput Diagnostic
+------------------------------------------
+- Implemented `scripts/evaluate_foundation_prefix_throughput.py`.
+- Purpose:
+  - compare foundation per-decision throughput predictions against the Stage 2 dataset's stored XGBoost prefix predictions.
+  - this is the correct gate before any stop-policy experiment.
+- Artifact:
+  - `artifacts_exact_public/foundation_prefix_throughput_eval/v2_causal_bucket_throughput_eps_10_prefix_throughput.json`
+- Overall prefix result:
+  - val foundation MAE/RMSE/within-10%: `80.89` / `145.44` / `0.183`
+  - val XGBoost MAE/RMSE/within-10%: `18.98` / `47.99` / `0.662`
+  - test foundation MAE/RMSE/within-10%: `68.52` / `129.91` / `0.238`
+  - test XGBoost MAE/RMSE/within-10%: `17.72` / `42.71` / `0.655`
+  - robustness foundation MAE/RMSE/within-10%: `105.76` / `338.44` / `0.215`
+  - robustness XGBoost MAE/RMSE/within-10%: `32.14` / `158.30` / `0.650`
+- Decision-index examples:
+  - val decision 0: foundation MAE `162.1`, XGBoost MAE `81.4`
+  - val decision 9: foundation MAE `66.1`, XGBoost MAE `12.1`
+  - val decision 19: foundation MAE `71.1`, XGBoost MAE `6.5`
+  - test decision 19: foundation MAE `58.8`, XGBoost MAE `6.2`
+- Interpretation:
+  - the v2 `final_mu` head learned a moderate full-trace predictor.
+  - the v2 per-decision `throughput_mu` head is not usable for early stopping.
+  - no stop-policy run should be launched from this checkpoint.
+  - likely issue: heteroscedastic NLL lets the prefix mean remain poor while the variance head absorbs error.
+
+Foundation v2.1 Deterministic Prefix Loss
+-----------------------------------------
+- Added deterministic log-throughput Huber loss support to the shared v1.5/v2 training loss.
+- New v2 trainer flags:
+  - `--prefix-huber-weight`
+  - `--full-huber-weight`
+  - `--huber-beta`
+- Probe:
+  - output: `artifacts_exact_public/foundation_v21_causal_bucket_huber_eps_10_probe/`
+  - one CPU train batch completed successfully.
+  - train components included finite `prefix_huber` and `final_huber`.
+- Next run:
+  - train v2.1 with NLL disabled and Huber enabled.
+  - after training, rerun prefix-throughput evaluation.
+  - only if v2.1 prefix MAE approaches or beats XGBoost should we add a stop-policy objective.
+
+Foundation v2.1 Huber Result
+----------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_v21_causal_bucket_huber_eps_10/`
+- Result:
+  - training completed in about `16m47s`.
+  - best epoch selected by final validation throughput MAE: epoch `4`.
+  - final throughput head:
+    - val MAE/RMSE: `73.88` / `136.71`
+    - test MAE/RMSE: `63.76` / `120.64`
+    - robustness MAE/RMSE: `101.54` / `349.26`
+  - prefix-throughput diagnostic:
+    - val foundation MAE/RMSE/within-10%: `160.91` / `252.40` / `0.042`
+    - test foundation MAE/RMSE/within-10%: `136.34` / `226.19` / `0.051`
+    - robustness foundation MAE/RMSE/within-10%: `186.66` / `435.24` / `0.043`
+- Interpretation:
+  - Huber made the model substantially worse.
+  - the trainer still selected by final throughput MAE, which is not the right criterion for early stopping.
+  - v2.1 is not a usable checkpoint.
+
+Foundation v2.2 Prefix-MSE Fix
+------------------------------
+- Added log-space MSE loss support:
+  - `--prefix-mse-weight`
+  - `--full-mse-weight`
+- Added prefix-throughput validation metrics to the v2 training summary.
+- Added epoch-selection metrics:
+  - `prefix_throughput_mae`
+  - `prefix_throughput_rmse`
+- Reason:
+  - the successful v1 throughput regressor used log1p MSE, not Huber or heteroscedastic NLL.
+  - the next v2 test should optimize and select directly on per-decision prefix MAE.
+- Probe:
+  - output: `artifacts_exact_public/foundation_v22_causal_bucket_mse_eps_10_probe/`
+  - one CPU train batch completed successfully.
+  - train components included finite `prefix_mse` and `final_mse`.
+  - summary includes `validation_prefix_throughput`.
+- Next run:
+  - train v2.2 with NLL and Huber disabled, MSE enabled, and selection metric `prefix_throughput_mae`.
+
+Foundation v2.2 Prefix-MSE Result
+---------------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_v22_causal_bucket_mse_eps_10/`
+- Training:
+  - completed in about `15m46s`.
+  - best epoch selected by validation `prefix_throughput_mae`: epoch `2`.
+- Final result:
+  - val final MAE/RMSE: `132.28` / not useful
+  - test final MAE: `110.73`
+  - robustness final MAE: `158.28`
+  - val prefix MAE/within-10%: `112.79` / `0.092`
+  - test prefix MAE/within-10%: `94.56` / `0.113`
+  - robustness prefix MAE/within-10%: `140.18` / `0.108`
+- External prefix evaluator:
+  - val foundation MAE/RMSE/within-10%: `112.79` / `201.40` / `0.092`
+  - val XGBoost MAE/RMSE/within-10%: `18.98` / `47.99` / `0.662`
+  - test foundation MAE/RMSE/within-10%: `94.56` / `179.18` / `0.113`
+  - test XGBoost MAE/RMSE/within-10%: `17.72` / `42.71` / `0.655`
+  - robustness foundation MAE/RMSE/within-10%: `140.18` / `404.76` / `0.108`
+  - robustness XGBoost MAE/RMSE/within-10%: `32.14` / `158.30` / `0.650`
+- Interpretation:
+  - v2.2 improved over Huber but still fails the prefix-throughput gate badly.
+  - training directly against true final throughput at every prefix is not enough.
+  - the causal bucket-stem v2 path should not be used for stop-policy training.
+- Decision:
+  - stop current v2 variants (`NLL`, `Huber`, `MSE`) as early-stop foundations.
+  - next valid experiment is teacher distillation from the XGBoost prefix predictions already stored in the Stage 2 shards.
+  - reason: Stage 2 baseline policy depends on those prefix predictions, and any foundation early-stop model must first match or improve their prefix accuracy.
+
+Foundation v2.3 XGBoost-Prefix Distillation Setup
+-------------------------------------------------
+- Added `--prefix-target-source {true,xgboost}` to `scripts/train_foundation_v2_multitask.py`.
+- Added `xgboost_y_pred_mbps` to the Stage 2 batch loader used by the v1.5/v2 trainer.
+- Behavior:
+  - `--prefix-target-source true` keeps the previous behavior: per-decision heads target `y_true_mbps`.
+  - `--prefix-target-source xgboost` makes per-decision heads target the stored Stage 1/XGBoost prefix predictions `y_pred_mbps`.
+  - final throughput still targets `y_true_mbps`.
+- Added teacher-mimic reporting to `scripts/evaluate_foundation_prefix_throughput.py`:
+  - foundation vs true
+  - XGBoost vs true
+  - foundation vs XGBoost teacher
+- Probe:
+  - output: `artifacts_exact_public/foundation_v23_xgb_prefix_distill_eps_10_probe/`
+  - one CPU train batch completed successfully.
+- Purpose:
+  - first check whether the foundation can learn the Stage 1 prefix function at all.
+  - if it cannot mimic XGBoost, the v2 architecture is not suitable.
+  - if it can mimic XGBoost, then the next step is residual/true-label fine-tuning to attempt beating XGBoost.
+
+Foundation v2.3 XGBoost-Prefix Distillation Result
+--------------------------------------------------
+- Artifact:
+  - `artifacts_exact_public/foundation_v23_xgb_prefix_distill_eps_10/`
+  - evaluator output: `artifacts_exact_public/foundation_prefix_throughput_eval/v23_xgb_prefix_distill_eps_10_prefix_throughput.json`
+- Training:
+  - completed in about `17m24s`.
+  - best epoch selected by validation `prefix_throughput_mae`: epoch `5`.
+  - prefix target source: `xgboost`.
+- Training-summary result:
+  - best validation prefix MAE: `103.78`
+  - best validation prefix within-10%: `0.135`
+  - validation final MAE at selected epoch: `68.24`
+- External prefix evaluator:
+  - val foundation MAE/RMSE/within-10%: `103.78` / `184.64` / `0.135`
+  - val XGBoost MAE/RMSE/within-10%: `18.98` / `47.99` / `0.662`
+  - val foundation-vs-XGBoost MAE: `100.19`
+  - test foundation MAE/RMSE/within-10%: `87.44` / `164.33` / `0.174`
+  - test XGBoost MAE/RMSE/within-10%: `17.72` / `42.71` / `0.655`
+  - test foundation-vs-XGBoost MAE: `84.30`
+  - robustness foundation MAE/RMSE/within-10%: `131.22` / `391.17` / `0.163`
+  - robustness XGBoost MAE/RMSE/within-10%: `32.14` / `158.30` / `0.650`
+  - robustness foundation-vs-XGBoost MAE: `117.19`
+- Interpretation:
+  - v2.3 cannot mimic the XGBoost prefix teacher.
+  - the causal bucket-stem v2 path is not suitable for early stopping in its current form.
+  - because it fails teacher distillation, residual fine-tuning or stop-policy training would not be meaningful.
+- Decision:
+  - stop v2 causal bucket-stem experiments.
+  - retain v1 throughput regressor as the current successful foundation-model contribution for Stage 1 val/test.
+  - for Stage 2 improvement, the next architecture should use the already-strong Stage 1/XGBoost prefix predictions as explicit inputs, not try to relearn them from raw buckets.
+
+Project-Level Conclusion After Pure Foundation Experiments
+----------------------------------------------------------
+- Current evidence does not support the claim that a pure raw-trace foundation model can completely beat the TurboTest pipeline within this project timeline.
+- What worked:
+  - the v1 foundation throughput regressor improves Stage 1 final-throughput regression on val/test compared with XGBoost.
+  - this is a valid foundation-model contribution because it uses self-supervised trace pretraining followed by supervised fine-tuning.
+- What did not work:
+  - pure raw-trace foundation models did not improve Stage 2 early-stop policy behavior.
+  - v1/v1.5 stop heads either stopped too aggressively with poor correctness or avoided stopping.
+  - v2 causal bucket-stem variants failed the prefix-throughput gate.
+  - v2.3 could not even mimic the XGBoost prefix teacher.
+- Interpretation:
+  - TurboTest is difficult to beat end-to-end because it separates the problem into a very strong prefix regressor plus a task-specific stopping policy.
+  - the Stage 2 Transformer benefits from XGBoost prefix predictions that are already highly accurate at decision time.
+  - asking a pure foundation model to learn both prefix throughput estimation and stopping policy from raw buckets is harder than the current architecture can handle.
+- Project framing:
+  - the honest result is not "foundation models replace TurboTest completely."
+  - the honest result is: foundation pretraining helps final-throughput regression, but full early termination still benefits from TurboTest's task-specific prefix-regression structure.
+- Next project direction:
+  - move from pure replacement to hybrid foundation-policy modeling.
+  - use TurboTest/XGBoost prefix predictions and uncertainty/error features as explicit inputs.
+  - optionally combine them with foundation trace embeddings.
+  - learn a better stopping policy on top of the strong TurboTest prefix representation.
+- This remains aligned with the project proposal:
+  - it evaluates whether foundation pretraining provides measurable benefits.
+  - it records where pure foundation learning helps and where it fails.
+  - it motivates a more realistic foundation-assisted early-termination model instead of forcing an unsupported pure replacement claim.
+
+Foundation Model v3 — Bucket-level Causal Transformer (2026-05-02)
+==================================================================
+
+Project Direction Update
+------------------------
+- Decision: try the "must beat at all costs" framing once more before settling on a hybrid.
+- Goal: a pure foundation model that beats both Stage 1 (throughput) and Stage 2 (early stop).
+- If a budgeted set of v3 experiments (A, B, C) all fail, we revert to the hybrid plan.
+
+v3 Architecture
+---------------
+- File: `scripts/foundation_model_v3.py`.
+- Reasoning behind the design choices:
+  - v1 patch encoder + CLS pool: 5-bucket compression destroyed information at decision time.
+  - v2 causal patch stem: 5-bucket compression carried over; each decision token saw only 5 raw buckets through one conv layer.
+  - v2.3 distillation failure (foundation could not even mimic XGBoost teacher): confirmed information bottleneck, not just a loss/training problem.
+  - v3 removes the patch step entirely: 100 bucket tokens, no compression, causal attention.
+- Architecture:
+  - bucket projection: linear `13 -> 256`.
+  - learned positional embedding `[1, 100, 256]`.
+  - 8-layer Transformer encoder, 8 heads, ff=1024, dropout=0.15, norm_first=True.
+  - explicit causal mask: bucket `t` can only attend to buckets `<= t` (verified by direct test in CPU smoke run).
+  - per-decision heads applied at end-buckets `{4, 9, ..., 99}` (matches Stage 2 decision schedule):
+    - throughput-mu MLP `256 -> 256 -> 1` (predicts log1p throughput).
+    - throughput-logvar MLP `256 -> 256 -> 1` (heteroscedastic uncertainty).
+    - stop-logit MLP `256 -> 256 -> 1` (BCE).
+  - sequence-level heads at last bucket position:
+    - final throughput head reuses the same `256 -> 256 -> 1` shape.
+    - speed-tier head `256 -> 256 -> 5`.
+  - pretraining head: next-bucket MLP `256 -> 256 -> 13`.
+- Total params at default config: `6.68M`.
+
+v3 Pretraining
+--------------
+- File: `scripts/pretrain_foundation_v3.py`.
+- Self-supervised objective: causal next-bucket prediction.
+- Strict scope: only the `720,000` Stage 1 train UUIDs (no val/test/robustness leakage).
+- Loss: SmoothL1 between predicted bucket `t+1` and observed bucket `t+1`, masked by `bucket_mask`.
+- Hyperparameters:
+  - 5 epochs.
+  - batch size 256.
+  - AdamW, lr `3e-4`, weight decay `0.02`, warmup 500 steps.
+  - feature dropout `5%` (zero a small fraction of bucket vectors before encoding).
+  - gradient clipping `1.0`.
+- Run on WSL CUDA:
+  - command: `python3 /mnt/e/fmfstlt/scripts/pretrain_foundation_v3.py --epochs 5 --batch-size 256 --device cuda`.
+  - epoch 1 loss `0.0603`, epoch 5 loss `0.0547`.
+  - artifact: `artifacts_exact_public/foundation_v3_pretrain/fmnet_v3_pretrain.pt`.
+
+v3 Multi-task Fine-tuning
+-------------------------
+- File: `scripts/train_foundation_v3_multitask.py`.
+- Loads pretrained encoder weights when `--pretrained-checkpoint` is supplied.
+- Targets (from Stage 2 epsilon=10 dataset):
+  - per-decision throughput (log1p MSE on `y_true_mbps` broadcast to all valid decisions).
+  - per-decision stop logit (BCE on `stop_label`).
+  - final throughput (log1p MSE on `y_true_mbps`, pooled at bucket 99).
+  - speed-tier classification (CE on `speed_tier`).
+- Default loss weights: prefix throughput `2.0`, stop BCE `1.0`, final throughput `0.5`, speed-tier `0.2`.
+- Threshold sweep: 19 thresholds from `0.05` to `0.95`, selection via `policy_constrained_savings` with `min_within_epsilon_rate = 0.66`.
+- Hyperparameters:
+  - 5 epochs.
+  - physical batch size 128, gradient accumulation 8, effective batch size 1024.
+  - AdamW, lr `1e-4`, weight decay `0.02`, warmup 500 steps.
+  - dropout `0.15`, head dropout `0.10`, gradient clip `1.0`.
+- v3 supports an optional second-phase fine-tune via `--phase-1-epochs` and `--phase-2-*-weight` flags so the loss schedule can switch mid-training.
+
+v3 First Two Runs (CUDA, May 2 2026)
+------------------------------------
+- Run A: pretrained checkpoint, joint multi-task fine-tune.
+  - command: `python3 /mnt/e/fmfstlt/scripts/train_foundation_v3_multitask.py --pretrained-checkpoint /mnt/e/fmfstlt/artifacts_exact_public/foundation_v3_pretrain/fmnet_v3_pretrain.pt --epochs 5 --batch-size 128 --gradient-accumulation-steps 8 --device cuda`.
+  - artifact: `artifacts_exact_public/foundation_v3_multitask_eps_10/`.
+  - selected: epoch 3, threshold `0.70`.
+  - val:        F1 `0.8635`, within-eps `0.6629`, savings `5156.8 ms`, final MAE `108.94`, prefix MAE foundation `116.17` (XGBoost `18.98`).
+  - test:       F1 `0.8517`, within-eps `0.6727`, savings `5012.9 ms`, final MAE `110.54`.
+  - robustness: F1 `0.8473`, within-eps `0.6578`, savings `5147.6 ms`, final MAE `137.09`.
+- Run B: random init, joint multi-task fine-tune (ablation).
+  - artifact: `artifacts_exact_public/foundation_v3_multitask_eps_10_no_pretrain/`.
+  - selected: epoch 5, threshold `0.35`.
+  - val:        F1 `0.8461`, within-eps `0.6601`, savings `5096.8 ms`, final MAE `40.15`, prefix MAE foundation `51.24`.
+  - test:       F1 `0.8326`, within-eps `0.6674`, savings `4993.6 ms`, final MAE `37.62`.
+  - robustness: F1 `0.8281`, within-eps `0.6569`, savings `5100.8 ms`, final MAE `68.67`.
+
+v3 Comparison vs Frozen Stage 2 epsilon=10 Baseline
+---------------------------------------------------
+- Stage 2 baseline:
+  - val:        F1 `0.8696`, within-eps `0.6684`, savings `5240.9 ms`.
+  - test:       F1 `0.8608`, within-eps `0.6786`, savings `5144.7 ms`.
+  - robustness: F1 `0.8565`, within-eps `0.6608`, savings `5245.0 ms`.
+- v3 pretrained vs baseline:
+  - val:        delta F1 `-0.0061`, delta within-eps `-0.0055`, delta savings `-84.1 ms`.
+  - test:       delta F1 `-0.0091`, delta within-eps `-0.0059`, delta savings `-131.8 ms`.
+  - robustness: delta F1 `-0.0092`, delta within-eps `-0.0030`, delta savings `-97.4 ms`.
+- All metrics on all subsets are slightly behind the baseline. Not a Pareto win.
+- Throughput regression for v3:
+  - Stage 1 XGBoost final MAE val/test/robust: `19.88` / `18.55` / `35.23`.
+  - foundation v1 final MAE: `16.23` / `14.24` / `38.76`.
+  - foundation v3 pretrained final MAE: `108.94` / `110.54` / `137.09`. Worse than both.
+  - foundation v3 no-pretrain final MAE: `40.15` / `37.62` / `68.67`. Still worse.
+  - prefix throughput v3 pretrained val MAE: `116.17` vs XGBoost `18.98`. ~6x worse.
+  - pretraining hurt throughput, helped stop F1 (opposite of expectation).
+
+Experiment A — Threshold Sweep on v3 Pretrained Checkpoint
+----------------------------------------------------------
+- Goal: find any threshold where v3 Pareto-dominates Stage 2 at the same operating point.
+- Method: compare full v3 sweep (`final_metrics[subset].policy_threshold_sweep`) against frozen Stage 2 sweep (`stage2_threshold_sweep/threshold_sweep_eps_10.json`).
+- Result:
+  - val: no v3 operating point dominates any baseline operating point.
+  - test: no v3 operating point dominates any baseline operating point.
+  - the v3 sweep curve sits about `100-250 ms` below the baseline curve at every matched within-eps level.
+- Conclusion: Experiment A fails. Move to Experiment B.
+
+Experiment B — Sequential Fine-tune
+-----------------------------------
+- Hypothesis: throughput head collapses because multi-task BCE pressure from epoch 1 drags the encoder away from the throughput regression solution.
+- Mitigation: train phase 1 throughput-only for 3 epochs, then phase 2 joint for 2 more epochs.
+- Code: added `--phase-1-epochs` and `--phase-2-*-weight` flags to `train_foundation_v3_multitask.py`.
+- Phase 1 weights: prefix `3.0`, stop `0.0`, final `1.0`, speed `0.1`.
+- Phase 2 weights: prefix `1.0`, stop `1.0`, final `0.5`, speed `0.1`.
+- Run command:
+  - `python3 /mnt/e/fmfstlt/scripts/train_foundation_v3_multitask.py --pretrained-checkpoint /mnt/e/fmfstlt/artifacts_exact_public/foundation_v3_pretrain/fmnet_v3_pretrain.pt --epochs 5 --batch-size 128 --gradient-accumulation-steps 8 --device cuda --output-root /mnt/e/fmfstlt/artifacts_exact_public/foundation_v3_multitask_eps_10_seq --prefix-throughput-weight 3.0 --stop-bce-weight 0.0 --final-throughput-weight 1.0 --speed-tier-weight 0.1 --phase-1-epochs 3 --phase-2-prefix-throughput-weight 1.0 --phase-2-stop-bce-weight 1.0 --phase-2-final-throughput-weight 0.5 --phase-2-speed-tier-weight 0.1`.
+- Artifact: `artifacts_exact_public/foundation_v3_multitask_eps_10_seq/`.
+- Phase 1 progression of `prefix_MAE_foundation` on val:
+  - epoch 1 `198.49`, epoch 2 `113.62`, epoch 3 `96.37`.
+- Phase 2 progression of `prefix_MAE_foundation` on val:
+  - epoch 4 `96.60`, epoch 5 `42.07`.
+- Selected: epoch `5`, threshold `0.35`.
+- Final result:
+  - val: F1 `0.8473`, within-eps `0.6670`, savings `5109.8 ms`, final MAE `38.59`, prefix MAE `42.07`.
+  - test: F1 `0.8400`, within-eps `0.6735`, savings `4969.3 ms`, final MAE `32.88`.
+  - robustness: F1 `0.8394`, within-eps `0.6594`, savings `4990.1 ms`, final MAE `67.96`.
+- Comparison vs Stage 2 baseline:
+  - val: delta F1 `-0.0223`, delta within-eps `-0.0014`, delta savings `-131.1 ms`.
+  - test: delta F1 `-0.0208`, delta within-eps `-0.0051`, delta savings `-175.4 ms`.
+  - robustness: delta F1 `-0.0171`, delta within-eps `-0.0014`, delta savings `-254.9 ms`.
+- Throughput vs XGBoost / foundation v1:
+  - val final MAE: foundation v3 seq `38.59` vs XGBoost `19.88` vs foundation v1 `16.23`. Improved over Run A but still worse than both.
+  - val prefix MAE foundation `42.07` vs XGBoost `18.98`. Best v3 prefix result so far. Still ~2.2x worse than XGBoost.
+- Conclusion: Experiment B fails the Pareto bar but moves throughput in the right direction.
+- Diagnostic insight:
+  - phase 1 throughput-only training did not get prefix MAE near XGBoost (only `96` after 3 epochs).
+  - phase 2 with stop loss added cut prefix MAE more than half in 2 epochs (`96 -> 42`).
+  - the joint loss is actually helpful for throughput, not harmful.
+  - this argues against further phase-splitting and in favour of simply training joint multi-task for longer.
+
+Experiment C — Longer Pretraining + Longer Joint Fine-tune
+----------------------------------------------------------
+- Plan based on Experiment B diagnostic:
+  - extend pretraining from 5 to 10 epochs (more self-supervised signal).
+  - drop the phase split.
+  - extend fine-tune to 10 epochs of joint multi-task at lower learning rate `5e-5`.
+- Run commands:
+  - pretrain: `python3 /mnt/e/fmfstlt/scripts/pretrain_foundation_v3.py --epochs 10 --batch-size 256 --device cuda --output-root /mnt/e/fmfstlt/artifacts_exact_public/foundation_v3_pretrain_10ep`.
+  - fine-tune: `python3 /mnt/e/fmfstlt/scripts/train_foundation_v3_multitask.py --pretrained-checkpoint /mnt/e/fmfstlt/artifacts_exact_public/foundation_v3_pretrain_10ep/fmnet_v3_pretrain.pt --epochs 10 --batch-size 128 --gradient-accumulation-steps 8 --device cuda --learning-rate 5e-5 --output-root /mnt/e/fmfstlt/artifacts_exact_public/foundation_v3_multitask_eps_10_long`.
+- Pretraining outcome:
+  - 10 epochs completed, best loss `0.0545` at epoch 8.
+  - artifact: `artifacts_exact_public/foundation_v3_pretrain_10ep/fmnet_v3_pretrain.pt`.
+- Fine-tune outcome:
+  - 10 epochs completed, selected epoch `3` with threshold `0.60` (selection metric: `policy_constrained_savings`).
+  - artifact: `artifacts_exact_public/foundation_v3_multitask_eps_10_long/`.
+- Per-epoch validation summary:
+  - ep1 thr=0.45: F1 `0.8155`, within-eps `0.6692`, savings `4508.8 ms`, finalMAE `173.68`.
+  - ep2 thr=0.55: F1 `0.8469`, within-eps `0.6700`, savings `4753.8 ms`, finalMAE `97.04`.
+  - ep3 thr=0.60: F1 `0.8482`, within-eps `0.6710`, savings `5294.5 ms`, finalMAE `68.30`.
+  - ep4 thr=0.75: F1 `0.8564`, within-eps `0.6723`, savings `4841.3 ms`, finalMAE `88.12`.
+  - ep5 thr=0.35: F1 `0.8652`, within-eps `0.6697`, savings `5189.9 ms`, finalMAE `41.80` (best throughput).
+  - ep6 thr=0.75: F1 `0.8692`, within-eps `0.6758`, savings `4875.7 ms`, finalMAE `206.13` (throughput spike).
+  - ep7 thr=0.50: F1 `0.8692`, within-eps `0.6742`, savings `5137.5 ms`, finalMAE `66.55`.
+  - ep8 thr=0.45: F1 `0.8669`, within-eps `0.6668`, savings `4814.3 ms`, finalMAE `63.84`.
+  - ep9 thr=0.50: F1 `0.8687`, within-eps `0.6647`, savings `5021.8 ms`, finalMAE `111.80`.
+  - ep10 thr=0.55: F1 `0.8696`, within-eps `0.6720`, savings `5083.5 ms`, finalMAE `67.67`.
+- Selected (epoch 3, threshold 0.60) final results:
+  - val: F1 `0.8482`, within-eps `0.6710`, savings `5294.5 ms`, finalMAE `68.30`, prefix MAE foundation `63.64` (XGBoost `18.98`).
+  - test: F1 `0.8405`, within-eps `0.6745`, savings `5172.9 ms`, finalMAE `63.56`.
+  - robustness: F1 `0.8352`, within-eps `0.6631`, savings `5242.9 ms`, finalMAE `91.79`.
+- Pareto comparison vs Stage 2 baseline (full 19-threshold sweep on the saved model):
+  - val: STRICT Pareto win at threshold `0.60` (within-eps `+0.0026`, savings `+53.6 ms`).
+  - test: NO threshold strictly dominates baseline. Closest is threshold `0.60` with within-eps `-0.0041` and savings `+28.2 ms` (mixed; within statistical noise of ~`2 sigma`).
+  - robustness: NO threshold strictly dominates baseline. Closest is threshold `0.60` with within-eps `+0.0023` and savings `-2.1 ms` (essentially tied).
+- Stage 1 throughput vs frozen XGBoost / foundation v1:
+  - XGBoost final MAE val/test/robust: `19.88` / `18.55` / `35.23`.
+  - foundation v1 final MAE: `16.23` / `14.24` / `38.76`.
+  - foundation v3 long (ep3 selected) final MAE: `68.30` / `63.56` / `91.79`. Clear loss on Stage 1.
+  - foundation v3 long (ep5, best throughput epoch) final MAE: `41.80` (val). Still 2x worse than XGBoost.
+- Triple-criterion search (single epoch beats both stages):
+  - need: finalMAE `< 19.88` AND val within-eps `> 0.6684` AND val savings `> 5240.9 ms`.
+  - no epoch in v3 long satisfies all three. Throughput peak (ep5) and policy peak (ep3) are at different epochs.
+
+Verdict on "Must Beat at All Costs"
+-----------------------------------
+- Pure foundation v3 cannot beat both stages with a single checkpoint at this scale.
+- v3 long marginally wins Stage 2 on val and ties on test/robustness.
+- v3 long clearly loses Stage 1 throughput at every epoch.
+- Two-model alternative (foundation v1 for Stage 1, foundation v3 for Stage 2) gives clean wins on both stages but is not a single foundation model.
+- Three options now open:
+  1. accept v3 long as the pure-foundation Stage 2 result, retain foundation v1 as the Stage 1 result, frame the contribution as "two foundation models share the same SSL paradigm".
+  2. one more pure-foundation experiment (e.g., higher prefix throughput weight, decoupled-head fine-tune, more epochs).
+  3. pivot to the hybrid foundation-assisted plan documented earlier (use XGBoost prefix predictions as explicit inputs to the foundation policy head).
+- Decision taken: try Experiment D (option 2) before any pivot.
+
+Experiment D — Throughput-First Two-Phase Fine-tune
+---------------------------------------------------
+- Goal: test whether v3 throughput collapse is loss interference or architectural bottleneck.
+- Phase 1 (epochs 1-10): pure throughput training.
+  - weights: prefix `2.0`, stop `0.0`, final `1.0`, speed `0.0`.
+  - lets the throughput head converge with no stop pressure.
+- Phase 2 (epochs 11-15): joint training, throughput-dominant.
+  - weights: prefix `3.0`, stop `1.0`, final `0.5`, speed `0.1`.
+  - tests whether stop policy can be added without destroying converged throughput.
+- Init: 10-epoch pretrain checkpoint `foundation_v3_pretrain_10ep/fmnet_v3_pretrain.pt`.
+- lr `5e-5`, AdamW, weight decay `0.02`.
+- 15 epochs, batch 128, grad accumulation 8.
+- Output target: `artifacts_exact_public/foundation_v3_throughput_then_stop/`.
+- Falsifiable diagnostics:
+  - if Phase 1 ends with val final MAE `< 20`, Stage 1 is reachable -> Phase 2 will tell whether stop policy can coexist.
+  - if Phase 1 ends with val final MAE `> 30`, v3 architecture is the bottleneck regardless of training schedule -> pivot to hybrid.
+  - if Phase 2 maintains val final MAE `< 25` AND wins Stage 2 Pareto on test, that is the success case.
+- Estimated runtime: ~2 hours on the local RTX 5080.
+- Run command:
+  - `python3 /mnt/e/fmfstlt/scripts/train_foundation_v3_multitask.py --pretrained-checkpoint /mnt/e/fmfstlt/artifacts_exact_public/foundation_v3_pretrain_10ep/fmnet_v3_pretrain.pt --epochs 15 --batch-size 128 --gradient-accumulation-steps 8 --learning-rate 5e-5 --device cuda --output-root /mnt/e/fmfstlt/artifacts_exact_public/foundation_v3_throughput_then_stop --prefix-throughput-weight 2.0 --stop-bce-weight 0.0 --final-throughput-weight 1.0 --speed-tier-weight 0.0 --phase-1-epochs 10 --phase-2-prefix-throughput-weight 3.0 --phase-2-stop-bce-weight 1.0 --phase-2-final-throughput-weight 0.5 --phase-2-speed-tier-weight 0.1`
+
+Experiment D — Result
+---------------------
+- Phase 1 (epochs 1-10, pure throughput) progression of val finalMAE:
+  - ep1 `168.03`, ep2 `104.03`, ep3 `61.40`, ep4 `75.71`, ep5 `48.49`, ep6 `151.05`, ep7 `100.40`, ep8 `82.26`, ep9 `90.27`, ep10 `44.28` (best in phase 1).
+- Phase 1 best val prefix MAE (foundation): `51.13` at ep10. XGBoost prefix MAE: `18.98`.
+- By the falsifiable gate ("if Phase 1 ends with val finalMAE > 30, architecture is the bottleneck"), Phase 1 confirms the bottleneck. 10 epochs of pure throughput training with no stop pressure cannot bring v3 prefix accuracy near XGBoost.
+- Phase 2 (epochs 11-15, joint) progression of val finalMAE:
+  - ep11 `43.39`, ep12 `56.99`, ep13 `95.43`, ep14 `63.58`, ep15 `21.01` (huge drop, first time v3 came near XGBoost).
+- Phase 2 was volatile. ep15 was not saved because the trainer's `policy_constrained_savings` selection picked ep14 (savings `5133.4 ms` > ep15 `5039.8 ms`).
+- Selected (ep14, threshold `0.40`) final results:
+  - val: F1 `0.8664`, within-eps `0.6681`, savings `5133.4 ms`, finalMAE `63.58`, prefix MAE foundation `73.32` (XGBoost `18.98`).
+  - test: F1 `0.8563`, within-eps `0.6754`, savings `5035.8 ms`, finalMAE `53.68`.
+  - robustness: F1 `0.8494`, within-eps `0.6612`, savings `5146.2 ms`, finalMAE `88.73`.
+- Pareto comparison vs Stage 2 baseline:
+  - val: not dominant. F1 `-0.0032`, within-eps `-0.0003`, savings `-107.5 ms`.
+  - test: not dominant. F1 `-0.0045`, within-eps `-0.0032`, savings `-108.9 ms`.
+  - robustness: not dominant. F1 `-0.0071`, within-eps `+0.0004`, savings `-98.8 ms`.
+- ep15 hypothetical (not saved):
+  - val finalMAE `21.01` (close to XGBoost `19.88`).
+  - val prefix MAE `52.40` (still 2.7x XGBoost).
+  - val within-eps `0.6726`, savings `5039.8 ms` (still below baseline `5240.9`).
+  - even at the throughput peak, ep15 does not beat both stages simultaneously.
+
+Final Verdict on "Must Beat at All Costs"
+-----------------------------------------
+- Four experiments (A: threshold sweep on Run A; B: sequential fine-tune; C: 10ep pretrain + 10ep joint; D: 10ep throughput-only + 5ep joint) have all failed.
+- No single pure-foundation v3 checkpoint Pareto-dominates the frozen Stage 2 baseline on test.
+- v3 throughput head can briefly approach XGBoost (val finalMAE `21.01` at ep15 of D), but not stably and not while also beating Stage 2 savings.
+- Phase 1 of Experiment D produced 10 epochs of pure throughput training with no stop pressure and still landed at val finalMAE `44.28`. This is a strong falsifiable signal that the v3 bucket-level causal Transformer at this size cannot match XGBoost prefix accuracy regardless of training schedule.
+- Best single-model pure-foundation result so far: Run C ep3 (val Pareto win, test/robust statistically tied, Stage 1 lost).
+- Decision: pivot to the hybrid foundation-assisted plan documented earlier in this file (block "Project-Level Conclusion After Pure Foundation Experiments").
+
+Pivot Plan: Hybrid Foundation-Assisted Stage 2
+----------------------------------------------
+- Architecture target: a stop-policy model that consumes both
+  - foundation trace embedding (from FMNet v3 pretrained encoder, frozen or low-lr fine-tuned), and
+  - XGBoost prefix predictions plus their relative-error / uncertainty features at every decision.
+- Why this should work:
+  - the XGBoost predictions are already strong at every decision (val prefix MAE `18.98`); v3 cannot match them.
+  - the foundation trace embedding can supply complementary information (raw trace dynamics, not visible to XGBoost which is window-only).
+  - the policy head learns directly on top of accurate prefix predictions, removing the throughput-collapse failure mode that broke v3.
+- Inputs per decision `d`:
+  - foundation decision-token hidden state at end-bucket `5d+4` (256-dim).
+  - XGBoost prefix prediction `y_pred_mbps[d]`.
+  - XGBoost relative-error `relative_error[d]` (for training the policy to recognise correctness; not used at deployment time when no ground truth is available).
+  - decision metadata: `elapsed_ms`, `observed_buckets_seen`.
+- Head: small MLP `[256 + few extra features] -> 128 -> 1` for stop logit. Optional uncertainty head later.
+- Training:
+  - freeze the FMNet v3 encoder for the first 1-2 epochs (only train the head).
+  - then unfreeze with low lr `2e-5` for fine-tuning.
+  - target: `stop_label` from the frozen Stage 2 epsilon=10 dataset.
+  - selection: `policy_constrained_savings` with `min_within_epsilon_rate = 0.66`.
+- Comparison story:
+  - Stage 1: keep using foundation v1 (already beats XGBoost on val/test final throughput).
+  - Stage 2: hybrid model should match or beat the frozen Stage 2 transformer.
+  - the "foundation contribution" is twofold: pretraining-derived trace embeddings used in the hybrid policy, and the standalone v1 throughput regressor.
+- Honest framing for paper:
+  - foundation pretraining provides measurable benefits in network measurement tasks.
+  - a pure-foundation single model cannot beat the specialized two-stage TurboTest pipeline on early termination at this scale.
+  - a foundation-assisted hybrid recovers competitive Stage 2 performance while keeping the foundation throughput regressor as a Stage 1 win.
+  - this matches the original project proposal language (evaluate whether foundation pretraining provides measurable benefits) without overclaiming pure replacement.
+
+Fallback Direction
+------------------
+- If A, B, and C all fail, revert to the hybrid foundation-assisted plan documented earlier (`Project-Level Conclusion After Pure Foundation Experiments` block above).
+- Hybrid uses XGBoost prefix predictions and uncertainty as explicit inputs to a foundation-assisted policy head.
+- The current v1 throughput regressor remains a valid foundation contribution either way.
+
+Clarified Main Project Objective (Single Foundation Two-Stage Model)
+====================================================================
+- Clarified objective:
+  - the project is not simply "raw trace directly to stop decision".
+  - the intended model should preserve the TurboTest two-stage order:
+    1. Stage 1 predicts throughput at each decision point.
+    2. Stage 2 consumes the Stage 1 outputs and decides stop/continue.
+  - the research question is whether both stages can be implemented inside one foundation-model system instead of using two separate task-specific TurboTest models.
+
+TurboTest structure:
+- Stage 1:
+  - model: XGBoost regressor.
+  - input: latest 2-second / 20-bucket window features.
+  - output: prefix throughput prediction `y_pred_mbps[d]` for each decision `d`.
+- Stage 2:
+  - model: Transformer stop-policy model.
+  - input: sequence of Stage 1 XGBoost predictions and decision metadata.
+  - output: stop/continue probability per decision.
+
+Desired foundation-model structure:
+- One foundation system should replace the two TurboTest models while keeping the same causal ordering:
+  - raw trace / prefix input
+  - foundation Stage 1 head predicts prefix throughput at every decision
+  - foundation Stage 1 outputs are assembled into a decision sequence
+  - foundation Stage 2 policy head consumes that sequence
+  - output is stop/continue probability per decision
+- In short:
+  - `raw trace -> foundation Stage 1 predictions -> foundation Stage 2 stop policy`
+- This is different from a one-shot direct classifier:
+  - `raw trace -> stop probability`
+- The important project claim should be about replacing `XGBoost + Transformer` with a single foundation two-stage system, not about removing the Stage 1 -> Stage 2 logic.
+
+What Previous Experiments Actually Tested
+-----------------------------------------
+- v1:
+  - tested foundation pretraining plus separate downstream heads.
+  - Stage 1 throughput regressor worked well on val/test.
+  - early-stop head did not explicitly consume the foundation Stage 1 predictions.
+  - therefore v1 did not test the exact single-foundation two-stage design.
+- v1.5/v1.6/v2/v3:
+  - jointly produced throughput predictions and stop logits from shared hidden states.
+  - this is close to the objective, but still not exact:
+    - the Stage 2 stop head was mostly reading hidden states directly.
+    - it was not explicitly forced to consume the model's own Stage 1 output sequence as its main input.
+  - these runs show that direct hidden-state stop heads are weak, but they do not fully disprove the intended Stage 1-output-to-Stage 2 foundation design.
+- v2.3:
+  - attempted XGBoost-prefix distillation.
+  - useful diagnostic, but still not the final desired architecture.
+- Hybrid plan:
+  - uses XGBoost prefix predictions plus foundation embeddings.
+  - useful fallback, but not the pure single-foundation replacement because Stage 1 is still TurboTest/XGBoost.
+
+Correct Next Architecture: Foundation Two-Stage FM
+--------------------------------------------------
+- File target:
+  - implement as a new clean script/model path, not by further overloading failed v2/v3 trainers.
+  - suggested files:
+    - `scripts/foundation_model_twostage.py`
+    - `scripts/train_foundation_twostage.py`
+- Shared foundation encoder:
+  - input: normalized full trace `x_full` with shape `[B, 100, 13]`.
+  - use causal bucket-level encoder from FMNet v3:
+    - bucket projection `13 -> 256`
+    - learned positional embeddings
+    - causal Transformer over 100 bucket tokens
+    - decision hidden states gathered at buckets `{4, 9, ..., 99}`
+  - this preserves the no-future-information constraint.
+
+Stage 1 Foundation Head
+-----------------------
+- For each decision `d`, using hidden state at end bucket `5d+4`:
+  - predict `stage1_mu[d] = log1p(prefix throughput prediction)`
+  - optionally predict `stage1_logvar[d]` as uncertainty
+- Supervision:
+  - primary target: true final throughput `y_true_mbps`, broadcast to every valid decision.
+  - loss: log1p MSE or Gaussian NLL.
+- Metrics:
+  - final throughput MAE/RMSE at decision 19.
+  - prefix throughput MAE/RMSE across all valid decisions.
+  - compare directly against TurboTest Stage 1 XGBoost predictions stored as `y_pred_mbps[d]`.
+
+Stage 2 Foundation Policy Input
+-------------------------------
+- Build an explicit decision-level sequence from foundation Stage 1 outputs:
+  - `stage1_pred_mbps[d] = expm1(stage1_mu[d])`
+  - `stage1_uncertainty[d]` from log variance or absolute confidence proxy
+  - `elapsed_ms[d]`
+  - `observed_buckets_seen[d]`
+  - optionally the decision hidden state `h_decision[d]`
+- This sequence is the foundation analogue of the TurboTest Stage 2 input.
+- Critical design rule:
+  - Stage 2 must consume the Stage 1 foundation outputs explicitly.
+  - it should not be only a direct hidden-state classifier.
+
+Stage 2 Foundation Policy Head
+------------------------------
+- Input sequence per decision:
+  - minimal version: `[stage1_pred_log, stage1_uncertainty, elapsed_norm, observed_norm]`
+  - stronger version: concatenate the minimal features with `h_decision[d]`
+- Policy module:
+  - small causal decision Transformer or GRU over 20 decision tokens.
+  - output: `stop_logit[d]`.
+- Supervision:
+  - target: `stop_label[d]` from the valid frozen epsilon=10 Stage 2 dataset.
+  - loss: weighted BCE over valid decisions.
+- Evaluation:
+  - threshold sweep on validation.
+  - select threshold by `policy_constrained_savings` with `min_within_epsilon_rate = 0.66`.
+  - report F1, within-epsilon rate, emitted-stop rate, mean savings, median savings.
+  - compare against frozen Stage 2 epsilon=10 Transformer.
+
+Training Schedule for the Correct Two-Stage Model
+-------------------------------------------------
+- Phase 0:
+  - initialize encoder from FMNet v3 pretraining if available.
+  - alternatively run from random init as an ablation.
+- Phase 1: Stage 1 foundation training.
+  - train encoder + Stage 1 throughput head.
+  - optimize prefix throughput prediction only.
+  - objective: make foundation Stage 1 outputs as accurate as possible before policy training.
+- Phase 2: detached Stage 2 policy training.
+  - feed `detach(stage1_mu, stage1_logvar)` into the policy module.
+  - train Stage 2 policy head on stop labels.
+  - reason: prevent stop-policy loss from destroying Stage 1 regression.
+- Phase 3: optional end-to-end fine-tuning.
+  - unfreeze the detach boundary.
+  - use small learning rate.
+  - keep high Stage 1 loss weight.
+  - run only if Phase 2 is already competitive.
+
+First Implementation Variant
+----------------------------
+- Start with the safest version:
+  - FMNet v3 causal encoder.
+  - Stage 1 head predicts `stage1_mu` and `stage1_logvar`.
+  - Stage 2 policy receives detached Stage 1 outputs plus decision metadata.
+  - include decision hidden state as an optional flag, default on.
+- Loss:
+  - `total = lambda_stage1 * prefix_mse + lambda_final * final_mse + lambda_stop * stop_bce`
+  - initial weights:
+    - Phase 1: `stage1=3.0`, `final=1.0`, `stop=0.0`
+    - Phase 2: `stage1=1.0`, `final=0.5`, `stop=1.0`
+- Why detach first:
+  - previous v3 runs showed unstable throughput when policy and throughput were jointly optimized.
+  - detach makes the experiment clean:
+    - can the foundation Stage 2 policy use foundation Stage 1 outputs?
+    - without corrupting the Stage 1 head.
+
+Success Criteria
+----------------
+- Stage 1:
+  - ideal: beat XGBoost final MAE on val/test.
+  - minimum useful: prefix MAE close enough to XGBoost that Stage 2 can make good stop decisions.
+- Stage 2:
+  - strict win: Pareto-dominate frozen Stage 2 epsilon=10 on test:
+    - same-or-better within-epsilon rate
+    - same-or-better mean savings
+  - acceptable research result:
+    - match Stage 2 within statistical noise while using one foundation two-stage model.
+- Project-level success:
+  - show whether a single foundation system can replace the two-model TurboTest pipeline while preserving the paper's Stage 1 -> Stage 2 logic.
+
+Important Framing Correction
+----------------------------
+- Previous wording "pure raw-trace foundation model cannot beat TurboTest" should be interpreted carefully.
+- What has failed so far:
+  - direct hidden-state stop heads.
+  - raw-trace models that did not explicitly feed foundation Stage 1 outputs into Stage 2.
+- What remains untested and is now the correct next experiment:
+  - a single foundation model that explicitly performs:
+    - foundation Stage 1 prediction
+    - then foundation Stage 2 policy over those Stage 1 predictions.
+- Therefore the next experiment is not another blind pure-foundation run.
+- It is the first exact test of the clarified project objective.
+
+Two-Stage Foundation Run 1 (STRICT + RICHER variants, 8L 256d encoder)
+======================================================================
+- Output roots:
+  - `artifacts_exact_public/foundation_twostage_strict/`
+  - `artifacts_exact_public/foundation_twostage_richer/`
+- Phase 1 (encoder + Stage 1 head only, lr 5e-5, 8 epochs):
+  - selected ep8: val finalMAE `31.60`, prefMAE foundation `39.32`, prefMAE XGBoost `18.98`.
+  - this is the strongest v3-family Phase 1 ever produced.
+- Phase 2 STRICT (encoder frozen, Stage 1 detached, 4-dim Stage 2 input, 5 epochs):
+  - selected ep1 thr `0.45`: val F1 `0.7922`, within-eps `0.6760`, savings `4966.5 ms`.
+  - test thr 0.45: F1 `0.7724`, within-eps `0.6800`, savings `4835.8 ms`.
+  - robustness thr 0.45: F1 `0.7718`, within-eps `0.6618`, savings `5008.4 ms`.
+- Phase 2 RICHER (4 + 256 dim Stage 2 input including h_decision, 5 epochs):
+  - selected ep3 thr `0.40`: val F1 `0.8616`, within-eps `0.6630`, savings `5123.8 ms`.
+  - test thr 0.40: F1 `0.8518`, within-eps `0.6738`, savings `4993.0 ms`.
+  - robustness thr 0.40: F1 `0.8505`, within-eps `0.6606`, savings `5036.5 ms`.
+- Phase 3 RICHER (end-to-end fine-tune, 3 epochs, lr 2e-5):
+  - selected ep3 thr `0.65`: val F1 `0.8721`, within-eps `0.6685`, savings `5093.5 ms`, finalMAE `52.03`.
+  - test thr 0.65: F1 `0.8619`, within-eps `0.6825`, savings `4897.3 ms`, finalMAE `48.21`.
+  - robustness thr 0.65: F1 `0.8616`, within-eps `0.6676`, savings `4979.4 ms`, finalMAE `73.33`.
+- Comparison vs Stage 2 baseline:
+  - val:        F1 `+0.0025`, within-eps `+0.0001`, savings `-147 ms`.
+  - test:       F1 `+0.0011`, within-eps `+0.0039`, savings `-248 ms`.
+  - robustness: F1 `+0.0051`, within-eps `+0.0068`, savings `-266 ms`.
+- This is the first single-foundation experiment to:
+  - beat Stage 2 baseline F1 on all three subsets
+  - beat Stage 2 baseline within-eps on test and robustness (and tie on val)
+- Trade-off: it loses ~150-270 ms mean savings on every subset.
+- No threshold strictly Pareto-dominates baseline on (within-eps, savings) — RICHER P3 sits on a different Pareto curve emphasising correctness over savings.
+- Stage 1 throughput in this single foundation system stays at val finalMAE `52` vs XGBoost `19.88`. Pretrain ep5 had val finalMAE `41.80` (best v3 Stage 1 ever) but volatile.
+
+V1 Prefix-Throughput Diagnostic
+-------------------------------
+- Question: should we plug foundation v1 (CLS-pool full-trace throughput regressor) into the two-stage Stage 1 slot?
+- v1 was reported in earlier sections as beating XGBoost on Stage 1 throughput.
+- Implemented `scripts/evaluate_v1_prefix_throughput.py` to evaluate v1 in prefix mode.
+- For each test and each valid Stage 2 decision `d` (end_bucket `5d+4`):
+  - prefix_mask[i] = original bucket_mask[i] AND (i <= 5d+4)
+  - run v1 encoder + head on (x_full, prefix_mask)
+- Output: `artifacts_exact_public/foundation_v1_prefix_throughput_eval/v1_prefix_throughput_eval.json`
+- Result on the FULL evaluation set:
+  - val:        v1 prefix MAE `37.99` vs XGBoost `18.98`. XGBoost 2.0x better.
+  - test:       v1 prefix MAE `33.65` vs XGBoost `17.72`. XGBoost 1.9x better.
+  - robustness: v1 prefix MAE `60.77` vs XGBoost `32.14`. XGBoost 1.9x better.
+  - per-decision: v1 loses to XGBoost at every decision index on every subset.
+- Single-shard probe was misleading (it hit the 0-25 Mbps tier where v1 looked 2.4x better than XGBoost; this does not generalise).
+- Final-position only (decision at bucket 99, full trace):
+  - val v1 `18.76` vs XGBoost `6.50`. XGBoost 2.9x better.
+  - test v1 `16.24` vs XGBoost `6.16`. XGBoost 2.6x better.
+  - robust v1 `46.89` vs XGBoost `19.17`. XGBoost 2.4x better.
+- Important framing correction:
+  - PROGRESS.txt earlier reported v1 final MAE `14.24` (test) vs XGBoost `18.55` and called this a Stage 1 win.
+  - That comparison was apples-to-oranges: v1 used full-trace CLS pooling for ONE prediction; XGBoost MAE `18.55` was averaged across ALL Stage 1 windows (every decision position), pulled up by very-early decisions.
+  - At per-decision granularity, XGBoost dominates v1 everywhere.
+  - Corollary: v1 cannot replace XGBoost as Stage 1 inside the two-stage foundation system.
+- Architectural ceiling observation:
+  - v1 patch+bidirectional, v3 bucket+causal, twostage strict P1 — all three produce val prefix MAE in the 37-40 range.
+  - XGBoost sits at 18.98.
+  - The 2x gap is consistent across architectures at ~6.7M params and ~10-15 epochs.
+
+Two-Stage Foundation Run 2 (Bigger Encoder + Longer Phase 1)
+============================================================
+- Goal: address the architectural ceiling diagnosed above.
+- Hypothesis: the val prefix MAE plateau at ~38 is a capacity/training-budget effect; a larger encoder and longer Phase 1 may reach val prefix MAE closer to XGBoost's 18.98.
+- Architectural change:
+  - encoder: 10 layers (vs 8), 256 d_model (same), 8 heads (same), 1024 ff_dim (same).
+  - approximate parameter count: 8.4M (vs 6.7M, ~1.25x).
+- Pretraining:
+  - reuse existing 10-epoch pretrain checkpoint `foundation_v3_pretrain_10ep/fmnet_v3_pretrain.pt`.
+  - partial-load: layers 0-7 receive pretrained weights, layers 8-9 stay at random init.
+  - this avoids a 2.5h fresh pretraining run.
+- Phase 1 (Stage 1 throughput training only):
+  - 12 epochs (vs 8 in Run 1).
+  - lr 5e-5, batch 128, grad accum 8.
+  - selection: best val prefix throughput MAE.
+- Phase 2 RICHER (Stage 2 policy on detached Stage 1 outputs):
+  - 5 epochs.
+  - lr 1e-3.
+  - include-h-decision = on (richer variant only; strict was clearly weaker in Run 1).
+- Phase 3 (gated end-to-end fine-tune):
+  - 3 epochs.
+  - lr 2e-5.
+  - gate: val within-eps `>= 0.65` AND val savings `>= 4500 ms`.
+- Estimated runtime: ~2.5 hours (Phase 1 ~110 min, Phase 2 ~20 min, Phase 3 ~25 min).
+- Output target: `artifacts_exact_public/foundation_twostage_bigger_richer/`.
+- Success criterion (same as Run 1):
+  - strict Pareto dominance vs Stage 2 baseline on test, OR
+  - Pareto improvement on within-eps with smaller savings loss than Run 1 RICHER (smaller than `-248 ms`).
+- Failure criterion:
+  - if val prefix MAE plateaus at ~38 again (within `5` of Run 1), the architectural ceiling is real and no realistic single-foundation Stage 1 will reach XGBoost; accept Run 1 RICHER as the final result.
+
+Two-Stage Foundation Run 2 — Result
+-----------------------------------
+- Phase 1 (12 epochs at lr 5e-5):
+  - val finalMAE/prefMAE_F trajectory:
+    - ep1 158/161, ep2 84/92, ep3 44/57, ep4 54/62, ep5 48/57, ep6 50/53,
+    - ep7 108/115 (spike), ep8 37/41, **ep9 19.26/28.34 (selected, best)**, ep10 36/45, ep11 41/54, ep12 37/46.
+  - selected ep9: val finalMAE `19.26`, prefMAE foundation `28.34`, prefMAE XGBoost `18.98`.
+  - val finalMAE `19.26` vs XGBoost `19.88`: **single-model foundation beats XGBoost final throughput on val**, first time ever.
+  - val prefMAE `28.34` vs Run 1 `39.32`: 28% improvement on per-decision throughput. Architectural ceiling shifted, not breached.
+- Phase 2 RICHER (5 epochs, encoder frozen, Stage 1 detached, lr 1e-3):
+  - selected ep5 thr `0.55`: val F1 `0.8708`, within-eps `0.6613`, savings `5117.6 ms`, finalMAE `19.26`.
+  - test thr 0.55: F1 `0.8592`, within-eps `0.6697`, savings `4931.1 ms`, finalMAE `16.65`.
+  - robustness thr 0.55: F1 `0.8533`, within-eps `0.6570`, savings `5092.2 ms`, finalMAE `45.20`.
+- Phase 3 (3 epochs end-to-end at lr 2e-5; gate passed):
+  - selected ep2 thr `0.55`: val F1 `0.8717`, within-eps `0.6675`, savings `5126.7 ms`, finalMAE `19.09`.
+  - test thr 0.55: F1 `0.8623`, within-eps `0.6741`, savings `4983.6 ms`, finalMAE `18.96`.
+  - robustness thr 0.55: F1 `0.8561`, within-eps `0.6631`, savings `5092.5 ms`, finalMAE `43.31`.
+- Comparison vs Stage 2 baseline (final eval, P3 ep2 thr 0.55):
+  - val: F1 `+0.0021 ✓`, within-eps `-0.0009` (tied), savings `-114 ms`.
+  - test: F1 `+0.0015 ✓`, within-eps `-0.0045` (tied within noise), savings `-161 ms`.
+  - robustness: F1 `-0.0004` (tied), within-eps `+0.0023 ✓`, savings `-152 ms`.
+- Comparison vs XGBoost Stage 1 (val/test/robust final MAE):
+  - val: foundation `19.09` vs XGBoost `19.88` -> `-0.79`. **Foundation beats XGBoost.**
+  - test: foundation `18.96` vs XGBoost `18.55` -> `+0.41`. Tied within noise.
+  - robust: foundation `43.31` vs XGBoost `35.23` -> `+8.08`. Foundation worse on time-shifted set.
+- Pareto sweep on the saved Phase 3 model:
+  - no threshold strictly Pareto-dominates baseline on (within-eps, savings) on any subset.
+  - the foundation Pareto curve sits ~`125-220 ms` below baseline at matched within-eps levels.
+  - at high thresholds (0.60-0.70) foundation beats baseline on within-eps but loses more savings.
+- Comparison vs Run 1 RICHER P3 (single-model previous best):
+  - test F1: Run 1 `0.8619` vs Run 2 `0.8623` (Run 2 marginally better).
+  - test within-eps: Run 1 `0.6825` vs Run 2 `0.6741` (Run 1 better by 0.008).
+  - test savings: Run 1 `4897` vs Run 2 `4984` (Run 2 better by 87 ms).
+  - test finalMAE: Run 1 `48.21` vs Run 2 `18.96` (**Run 2 dramatically better**).
+  - val finalMAE: Run 1 `52.03` vs Run 2 `19.09` (Run 2 dramatically better, beats XGBoost).
+- Net assessment of Run 2:
+  - Stage 1 throughput: BEATS XGBoost on val (-0.79 MAE), TIES on test (+0.41 MAE), still loses on robust.
+  - Stage 2 policy: F1 marginally beats baseline (3/3 subsets), within-eps tied within noise (val/test) or beats (robust), savings ~3% below baseline (150-220 ms).
+  - This is the first single foundation model to be genuinely competitive at BOTH stages simultaneously.
+
+Final Verdict After Run 2
+-------------------------
+- Project claim that holds:
+  - "A single foundation model with TurboTest's two-stage flow can be competitive with the specialized XGBoost+Transformer pipeline."
+  - Stage 1: foundation final-throughput regression beats XGBoost on val and ties on test (worse on time-shifted robust).
+  - Stage 2: foundation stop policy is statistically tied with the frozen Stage 2 Transformer baseline on F1 and within-eps, with a small (~3% relative) savings trade-off.
+- Project claim that does NOT hold:
+  - "Strict Pareto dominance on Stage 2 at any threshold."
+  - The foundation Pareto curve still sits ~125-220 ms below baseline on the savings axis at matched within-eps levels.
+- Honest framing for any submission:
+  - one foundation model trained with self-supervised causal next-bucket pretraining, fine-tuned in a Stage 1 -> Stage 2 sequence with a detached policy module, matches the two-model TurboTest pipeline on Stage 2 correctness and beats it on Stage 1 final throughput on the val set.
+  - savings on Stage 2 are within ~3% of the specialized two-model baseline.
+  - robustness (time-shifted held-out) remains a known weakness of all foundation variants.
+- Decision: Run 2 RICHER P3 ep2 is the final headline result for the pure-foundation track.
+- No further pure-foundation experiments planned. The architectural ceiling has been pushed but not broken; remaining gaps are in the noise band.
+
+Two-Stage Foundation Run 3 — Cosine LR + EMA Stabilization
+----------------------------------------------------------
+- Hypothesis: Run 2 Phase 1 was volatile (val finalMAE bouncing 19 ↔ 154 across epochs), and the saved checkpoint (ep9) was the lucky-best of a noisy trajectory. Optimization-stability fixes should let Phase 1 reach a more reliable minimum at or below ep9's val prefMAE 28.
+- Targeted improvements (no architectural change):
+  - cosine LR schedule: linear warmup -> cosine decay from `5e-5` to `5e-7` over the full Phase 1 horizon. Last few epochs at very low LR for stable settling.
+  - EMA model averaging: maintain shadow weights with decay `0.999`, evaluate on EMA weights, save EMA as the Phase 1 checkpoint.
+- Architecture: same as Run 2 (10 layers, 256 d_model, 8 heads, 1024 ff_dim, 8.4M params).
+- Initialization: same partial-load of existing `foundation_v3_pretrain_10ep` checkpoint (layers 0-7 pretrained, layers 8-9 random init).
+- Phase 1: 15 epochs (vs 12 in Run 2) to give cosine + EMA more horizon.
+- Phase 2 RICHER: 5 epochs (same as Run 2, no LR change).
+- Phase 3: 3 epochs (same as Run 2, gated).
+- Output target: `artifacts_exact_public/foundation_twostage_run3_cosine_ema/`.
+- Trainer additions to `train_foundation_twostage.py`:
+  - `--phase-1-cosine-lr`: enable cosine annealing.
+  - `--phase-1-cosine-min-lr-frac` (default `0.01`).
+  - `--phase-1-ema`: enable EMA averaging.
+  - `--phase-1-ema-decay` (default `0.999`).
+- Honest expectation:
+  - probability of strict Pareto win on test: ~25-30% (still uphill).
+  - probability of meaningful gap reduction without strict win: ~50%.
+  - probability of no improvement or regression: ~20%.
+- If Run 3 fails to strict-Pareto-dominate, accept Run 2 RICHER P3 as the final result.
+
+Two-Stage Foundation Run 3 — Result (HEADLINE)
+----------------------------------------------
+- Phase 1 trajectory was SMOOTH (cosine LR + EMA worked):
+  - val finalMAE / prefMAE_F:
+    - ep1 221/227, ep5 78/87, ep8 44/55, ep10 26/38, ep11 20/32, ep12 12/26, **ep13 9.68/22.96**, ep14 12/23, ep15 16/26.
+  - selected ep13: val finalMAE `9.68`, prefMAE foundation `22.96`, prefMAE XGBoost `18.98`.
+  - val finalMAE `9.68` BEATS XGBoost `19.88` (51% reduction) and BEATS foundation v1 `16.23`.
+  - This is the best foundation Stage 1 head ever produced in this project.
+- Phase 2 RICHER (encoder frozen at Phase 1 ep13, Stage 1 detached, 5 epochs):
+  - selected ep4 thr `0.45`: val F1 `0.8703`, within-eps `0.6650`, savings `5087.0 ms`, finalMAE `9.68`.
+- Phase 3 (3 epochs end-to-end at lr 2e-5): DESTROYED Stage 1.
+  - val finalMAE went `9.68` (Phase 2) -> `37.86` (Phase 3 ep2). 3-4x regression on Stage 1.
+  - Stage 2 within-eps marginally improved (val +0.0002, robust +0.0055) at large Stage 1 cost.
+  - Phase 3 is NOT a useful operating point.
+- FINAL METRICS — Phase 2 ep4 (encoder = Phase 1 ep13 weights):
+  - val:  F1 `0.8703` (Δ `+0.0007`), within-eps `0.6650` (Δ `-0.0034`), savings `5087.0 ms` (Δ `-153.9`), finalMAE `9.68` (XGBoost `19.88`, Δ `-10.20` ✓ WIN), prefMAE foundation `22.96` (XGBoost `18.98`).
+  - test: F1 `0.8604` (Δ `-0.0004`, tied), within-eps `0.6734` (Δ `-0.0052`, tied within noise), savings `4967.6 ms` (Δ `-177.1`), finalMAE `8.56` (XGBoost `18.55`, Δ `-9.99` ✓ WIN), prefMAE foundation `21.06` (XGBoost `17.72`).
+  - robust: F1 `0.8552` (Δ `-0.0013`, tied), within-eps `0.6598` (Δ `-0.0010`, tied), savings `5072.7 ms` (Δ `-172.3`), finalMAE `35.21` (XGBoost `35.23`, Δ `-0.02` ✓ TIED/WIN), prefMAE foundation `49.61` (XGBoost `32.14`).
+
+Final Verdict — STRONG PROJECT WIN
+----------------------------------
+- Single foundation model with TurboTest's two-stage flow (no XGBoost in deployment):
+  - Stage 1 (final throughput): foundation BEATS XGBoost on ALL 3 SUBSETS.
+    - val: -10.20 MAE (51% reduction).
+    - test: -9.99 MAE (54% reduction).
+    - robustness: -0.02 MAE (foundation marginally wins; first time ever).
+  - Stage 2 (early stop policy): foundation TIES specialized Stage 2 Transformer baseline.
+    - F1: tied within noise on all 3 (Δ ±0.0014).
+    - within-eps: tied within noise on all 3 (Δ ±0.0052).
+    - savings: -154 to -177 ms (~3% relative below baseline).
+- This is the first single-foundation-model experiment to:
+  - strictly beat XGBoost on Stage 1 final throughput across val/test/robustness simultaneously, AND
+  - match the specialized Stage 2 Transformer baseline within statistical noise on F1 and within-eps.
+- The savings gap (~3% relative) remains the only honest weakness; closing it would likely require either substantially more compute or a different inductive bias.
+- Project claim that holds (and is now defensible):
+  - "A single foundation model trained with self-supervised causal next-bucket pretraining and fine-tuned in a Stage 1 -> Stage 2 sequence with a detached policy module REPLACES the two-model TurboTest pipeline. Stage 1 final throughput is significantly improved (50%+ reduction in val/test MAE; tied on time-shifted robustness). Stage 2 stop-policy F1 and within-epsilon rate are statistically tied with the specialized two-model baseline at a small (~3%) cost in mean savings."
+- Headline checkpoint to use:
+  - `artifacts_exact_public/foundation_twostage_run3_cosine_ema/phase2_checkpoint.pt`
+- Phase 3 is to be discarded (Stage 1 regression).
+- No further experiments planned at this stage; followed up with a multi-epsilon diagnostic and revised verdict (see below).
+
+Multi-Epsilon Diagnostic (Foundation Run 3 Phase 2 vs Stage 2 Baseline)
+======================================================================
+- Goal: confirm the Run 3 result generalizes beyond eps=10 by examining the deploy-error distribution.
+- Implemented `scripts/compare_foundation_vs_baseline_multi_epsilon.py`.
+- Compares two ε=10-trained pipelines at their tuned operating points:
+  - foundation pipeline: Run 3 Phase 2 checkpoint at threshold `0.45`
+  - TurboTest pipeline: frozen Stage 2 ε=10 transformer at threshold `0.25`
+- Metric: within-eps rate at the chosen stop point, computed against y_true_mbps using TWO different prediction sources at deploy time:
+  - foundation's own throughput prediction at the stop (foundation's deployed value)
+  - XGBoost's stored prefix prediction at the stop (TurboTest's deployed value)
+- Output: `artifacts_exact_public/foundation_vs_baseline_multi_epsilon/multi_epsilon_comparison.json`.
+- Important framing reminder:
+  - "ε" in within-eps is a post-hoc cutoff for analysis; both pipelines are still ε=10-trained.
+  - This is NOT a multi-baseline comparison. We do not have valid TurboTest baselines for ε ≠ 10 (those are stale).
+  - The multi-eps numbers describe the deploy-error distribution shape, not "model trained at ε=5 vs model trained at ε=5".
+
+Multi-Epsilon Result Tables
+---------------------------
+- val (79,713 tests; foundation savings 5087 ms vs baseline 5241 ms, Δ -154 ms):
+  -    ε      F+F     F+X     B+X     B+F
+  -   5%     0.3397  0.4355  0.4340  0.3259
+  -  10%     0.5867  0.6650  0.6684  0.5705
+  -  15%     0.7265  0.7657  0.7690  0.7166
+  -  20%     0.7997  0.8176  0.8208  0.7948
+  -  25%     0.8440  0.8485  0.8507  0.8401
+  -  30%     0.8734  0.8693  0.8709  0.8701
+  -  35%     0.8951  0.8836  0.8846  0.8922
+- test (39,877 tests; foundation savings 4968 ms vs baseline 5145 ms, Δ -177 ms):
+  -    ε      F+F     F+X     B+X     B+F
+  -   5%     0.3320  0.4433  0.4444  0.3165
+  -  10%     0.5908  0.6734  0.6786  0.5755
+  -  15%     0.7365  0.7778  0.7824  0.7274
+  -  20%     0.8131  0.8310  0.8329  0.8067
+  -  25%     0.8574  0.8618  0.8635  0.8530
+  -  30%     0.8859  0.8817  0.8825  0.8831
+  -  35%     0.9054  0.8957  0.8973  0.9032
+- robustness (132,435 tests; foundation savings 5073 ms vs baseline 5245 ms, Δ -172 ms):
+  -    ε      F+F     F+X     B+X     B+F
+  -   5%     0.3283  0.4346  0.4313  0.3130
+  -  10%     0.5785  0.6598  0.6608  0.5626
+  -  15%     0.7238  0.7652  0.7645  0.7143
+  -  20%     0.8002  0.8191  0.8183  0.7936
+  -  25%     0.8425  0.8508  0.8490  0.8387
+  -  30%     0.8702  0.8716  0.8690  0.8676
+  -  35%     0.8901  0.8869  0.8829  0.8877
+- Legend:
+  - F+F: foundation chooses stop, deploys foundation's prediction (real foundation user experience).
+  - F+X: foundation chooses stop, deploys XGBoost's prediction at that stop (apples-to-apples policy comparison).
+  - B+X: baseline chooses stop, deploys XGBoost's prediction (real TurboTest user experience).
+  - B+F: baseline chooses stop, deploys foundation's prediction (curiosity row).
+
+Key Findings From Multi-Epsilon Diagnostic
+------------------------------------------
+- Stop-policy quality (F+X vs B+X, both deploying XGBoost):
+  - tied within ±0.005 across ALL ε on ALL subsets.
+  - foundation's Stage 2 module learned to pick stop points just as well as the specialized baseline transformer.
+- Foundation's per-decision prediction quality at the stop (F+F vs F+X):
+  - foundation's own prediction is consistently noisier than XGBoost's at the same stop.
+  - example val ε=10: F+F 0.5867 vs F+X 0.6650; same stop, ~8 pp accuracy difference.
+- End-to-end deployed comparison (F+F vs B+X, real user experience):
+  - tight ε (5-25%): TurboTest dominates by 1-10 pp.
+  - ε=30: tied.
+  - ε=35: foundation marginally wins by 0.5-1 pp.
+- The "Stage 1 win" reported under Run 3 was measured as foundation's at-d=19 MAE vs XGBoost's averaged-across-all-decisions MAE. That comparison was apples-to-oranges.
+- Apples-to-apples checks:
+  - foundation per-decision averaged MAE val: 22.96 vs XGBoost val: 18.98. XGBoost wins by 21%.
+  - foundation per-decision averaged MAE test: 21.06 vs XGBoost test: 17.72. XGBoost wins by 19%.
+  - at d=19 specifically: foundation 8-10 vs XGBoost ~6 (from prefix-throughput evaluator). XGBoost wins.
+
+Honest Scorecard (Foundation Run 3 Phase 2 vs TurboTest)
+--------------------------------------------------------
+- Foundation WINS:
+  - architectural simplicity (one model replacing two specialized models).
+  - self-supervised pretraining capability (TurboTest has none).
+  - within-eps at very loose tolerance (ε ≥ 30%) by ~0.5-1 pp.
+- Foundation TIES (within statistical noise):
+  - Stage 2 stop policy quality (F+X vs B+X within ±0.005).
+  - F1 score at ε=10 (within ±0.001).
+- Foundation LOSES:
+  - per-decision prefix throughput MAE (XGBoost wins by 19-21% averaged, ~25% at d=19).
+  - mean savings: TurboTest stops earlier by ~150-180 ms (~3%).
+  - deployed user-facing accuracy at tight ε (5-25%): TurboTest wins by 1-10 pp.
+
+Revised Project Verdict
+-----------------------
+- Earlier "Run 3 Phase 2 wins Stage 1 on val/test by 50%+" claim was a metric artifact.
+  - It compared foundation@d=19 (single-prediction-per-test) against XGBoost-averaged-across-all-decisions.
+  - When measured apples-to-apples, XGBoost wins per-decision throughput at every comparison level.
+- The genuine remaining wins are architectural (single model, pretraining capability) and stop-policy quality (tied with baseline).
+- For deployed user-facing accuracy at typical operating points (ε ≤ 25%), TurboTest still wins.
+- The ε=10 Run 3 metrics that I previously called "tied" used XGBoost predictions for the deployed value (apples-to-oranges); when foundation deploys its own predictions, the deployed within-eps is ~8 pp behind TurboTest.
+
+User-Facing Definition of within-ε
+----------------------------------
+- For each test:
+  - the system stops at some decision time t*
+  - the system reports a predicted Mbps value to the user (this is the model's prefix-throughput prediction at t*)
+  - y_true_mbps is the ground-truth full-trace throughput
+  - the test is "within-ε" if |reported - y_true| / y_true ≤ ε/100
+- within-ε rate = fraction of tests in the subset that satisfy this.
+- This is the user-facing accuracy of the deployed early-stop system.
+- It depends on BOTH the stop policy (when do we stop?) AND the prefix-prediction quality at the stop (what value do we report?).
+
+Per-Decision Prefix Throughput
+------------------------------
+- "Prefix" = the bucket history available BEFORE a given decision.
+- "Decision" = the moments where the early-stop system can choose to stop. In our setup: every 500 ms (buckets 4, 9, 14, ..., 99 -> 20 decision points).
+- "Prefix throughput at decision d" = the model's estimate of FINAL throughput, computed using only buckets 0..5d+4.
+- "Per-decision prefix throughput MAE" = MAE averaged across all valid (test, decision) pairs.
+- Why this matters: when the early-stop system stops at some decision, the user sees the model's prefix-throughput prediction at that decision (NOT at full trace). So per-decision prefix MAE drives the user-facing within-ε at deploy time, not full-trace MAE.
+
+Foundation Run 4 Plan — XGBoost Distillation in Phase 1
+=======================================================
+- Goal: close the deployed ε=10 gap by improving foundation's per-decision prefix predictions.
+- Method: train Stage 1 with an additional distillation loss that pulls foundation's per-decision predictions toward XGBoost's stored prefix predictions.
+- Crucially, this stays a SINGLE FOUNDATION MODEL claim:
+  - XGBoost is used as a TRAINING-TIME TEACHER (its predictions are stored in the Stage 2 dataset's `y_pred_mbps` field).
+  - At deployment, the foundation model uses ONLY its own predictions; XGBoost is not invoked at inference.
+  - This is standard knowledge distillation (BERT/MobileBERT/DistilBERT pattern).
+- Phase 1 loss with distillation:
+  - L = α * MSE(stage1_mu, log1p(y_true)) + β * MSE(stage1_mu, log1p(y_pred_xgboost)) + γ * MSE(final_mu, log1p(y_true))
+  - α = 1.0 (existing per-decision truth target)
+  - β = 1.5 to 2.0 (NEW: distill XGBoost prefix predictions)
+  - γ = 1.0 (existing final-trace truth target)
+- Architecture: same as Run 3 (10 layers, 256 d_model, 8 heads, 1024 ff_dim).
+- Initialization: same partial-load of `foundation_v3_pretrain_10ep` checkpoint.
+- Phase 1: 15 epochs with cosine LR + EMA + distillation (same stability tooling as Run 3).
+- Phase 2 + Phase 3: unchanged from Run 3.
+- Code change required:
+  - add `--phase-1-distill-weight` flag to `train_foundation_twostage.py`.
+  - read `xgb_y_pred` from the batch (already available; iter_batches passes it).
+  - add the distillation MSE term to Phase 1 loss only (Phase 2 and Phase 3 unchanged).
+- Expected outcome (if distillation succeeds):
+  - foundation per-decision averaged MAE drops from `22.96` toward XGBoost's `18.98`.
+  - foundation deployed within-eps at ε=10 climbs from `0.5867` toward `0.66+`.
+  - foundation final-trace MAE may slip slightly from `9.68` (the y_true target is partially diluted by distillation pressure).
+- Honest probability of success: ~50%.
+  - Higher than any other pure-foundation experiment because:
+    - v3 architecture has materially more capacity than the v2 architecture that previously failed distillation (v2.3).
+    - Run 3's cosine LR + EMA stability tooling avoids the volatility that plagued earlier experiments.
+    - distillation directly targets the bottleneck (per-decision prediction noise).
+- Failure mode if distillation does not close the gap:
+  - foundation's per-decision MAE may improve but not reach XGBoost's level.
+  - a more aggressive distillation weight or longer training might still help.
+  - if even aggressive distillation fails, the architectural ceiling is real and Run 3 is the final pure-foundation result.
+- Output target: `artifacts_exact_public/foundation_twostage_run4_distill/`.
+- Estimated runtime: ~3 hours (Phase 1 ~140 min, Phase 2 ~25 min, Phase 3 ~25 min).
+- Status: not yet implemented or run.
+
+Final Experiment Freeze for Submission (2026-05-09)
+===================================================
+- Decision: stop experiments here and move to final submission packaging.
+- Run 4 XGBoost-distillation remains future work and will not be implemented or run for the submission.
+- Final report will use the revised Run 3 interpretation, not the superseded "strong project win" wording above.
+- Final foundation checkpoint for the main single-foundation two-stage system:
+  - `artifacts_exact_public/foundation_twostage_run3_cosine_ema/phase2_checkpoint.pt`
+- Final baseline checkpoint:
+  - `artifacts_exact_public/stage2_transformer_eps_10_local_gpu_bs1024_acc4/stage2_transformer_model.pt`
+- Baseline scope:
+  - frozen epsilon=10 only.
+  - epsilon values 5,15,20,25,30,35 are not used as trained baselines because their Stage 2 datasets were materialized with stale XGBoost predictions.
+- Final submission claim:
+  - We implemented a single foundation-model system that preserves TurboTest's two-stage order:
+    `raw trace -> foundation Stage 1 prefix throughput -> foundation Stage 2 stop policy`.
+  - The foundation policy learns stop points that are statistically close to the specialized Stage 2 Transformer when evaluated with the same stored XGBoost prediction source (F+X vs B+X).
+  - The deployed foundation system does not fully beat TurboTest at tight epsilon=10 because its own per-decision prefix throughput predictions are weaker than XGBoost at the stop point.
+  - This is a useful negative/partial-positive result: foundation pretraining and shared modeling help, but replacing the specialized XGBoost prefix regressor remains the core bottleneck.
+- Final deliverables:
+  - working code in `scripts/`
+  - final ACM-style two-column report source: `submissions/final_report_acm_2page.tex`
+  - final code guide: `submissions/final_submission_code_guide.md`
