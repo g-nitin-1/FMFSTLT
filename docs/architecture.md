@@ -69,20 +69,14 @@ stage1_logvar: [batch, 20]
 ```
 
 `stage1_mu[d]` predicts `log(1 + final Mbps)` at decision `d`.
-`stage1_logvar[d]` predicts the log variance of that estimate.
+`stage1_logvar[d]` is exposed as an auxiliary policy input. In the selected run, this
+head is not directly optimized with Gaussian negative log likelihood or another
+uncertainty loss. It must not be interpreted as a calibrated variance estimate.
 
-The uncertainty objective is Gaussian negative log likelihood:
-
-```text
-L_nll = 0.5 * (exp(-s_d) * (y - mu_d)^2 + s_d)
-```
-
-where `s_d` is log variance and `y = log(1 + true final Mbps)`. The second term prevents
-the model from claiming unlimited uncertainty.
-
-Stage 1 is fully fine-tuned: both the pretrained encoder and throughput heads are
-updated. The final run uses cosine learning-rate decay and exponential moving average
-weights to reduce epoch-to-epoch instability.
+Stage 1 fully fine-tunes the pretrained encoder and throughput-mean head. The
+log-variance head receives no direct supervision. The final run uses cosine
+learning-rate decay and exponential moving average weights to reduce epoch-to-epoch
+instability.
 
 ## Stage 2: Stop Policy
 
@@ -107,6 +101,10 @@ stop_probability = sigmoid(stop_logit)
 
 The first valid probability above the selected threshold chooses the stop point. The
 system reports `expm1(stage1_mu[d])` as the predicted Mbps.
+
+The permanent-safe suffix targets are inherited from the frozen epsilon-10 baseline
+dataset and were generated from XGBoost prediction errors. The Stage 2 policy itself is
+trained on FMNet Stage 1 outputs and does not require XGBoost at deployment.
 
 ## Phased Fine-Tuning
 
