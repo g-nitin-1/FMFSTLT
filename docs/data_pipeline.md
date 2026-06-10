@@ -115,13 +115,16 @@ python -m scripts.make_stage1_uuid_split
 Build and train the reproduced TurboTest baseline:
 
 ```bash
-python -m scripts.build_stage1_regression_windows
-python -m scripts.train_stage1_xgboost
-python -m scripts.score_stage1_xgboost
-python -m scripts.build_stage2_stop_labels --epsilon 10
-python -m scripts.build_stage2_transformer_dataset --epsilon 10
-python -m scripts.train_stage2_transformer
+python -m experimental_scripts.build_stage1_regression_windows
+python -m experimental_scripts.train_stage1_xgboost
+python -m experimental_scripts.score_stage1_xgboost
+python -m experimental_scripts.build_stage2_stop_labels --epsilon 10
+python -m experimental_scripts.build_stage2_transformer_dataset --epsilon 10
+python -m experimental_scripts.train_stage2_transformer
 ```
+
+These baseline commands are retained for comparison and are not part of the primary
+foundation-model workflow.
 
 Generated CSV, NPZ, model, and log files are excluded from Git because the complete
 local workspace exceeds 100 GB.

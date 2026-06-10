@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a paper-faithful Stage 2 Transformer dataset from normalized shards."""
+"""Build the experimental paper-faithful Stage 2 Transformer dataset."""
 
 from __future__ import annotations
 

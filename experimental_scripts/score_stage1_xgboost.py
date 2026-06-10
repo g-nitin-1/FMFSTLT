@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Score Stage 1 window shards with a trained XGBoost regressor."""
+"""Score the experimental Stage 1 XGBoost baseline."""
 
 from __future__ import annotations
 

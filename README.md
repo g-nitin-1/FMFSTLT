@@ -89,12 +89,16 @@ See [Experiment History](docs/experiments.md) for the v1, v2, and v3 progression
 ## Repository Layout
 
 ```text
-fmfstlt/models/   Importable FMNet-v3 and two-stage model implementations
-scripts/          Data preparation, baseline, training, and evaluation CLIs
-sql/              M-Lab BigQuery extraction and feature engineering
-tests/            Fast unit tests for causality, shapes, and gradient isolation
-docs/             Architecture, data pipeline, experiment history, and report
+fmfstlt/models/          Importable FMNet-v3 and two-stage model implementations
+scripts/                 Supported data, pretraining, training, and evaluation workflow
+experimental_scripts/    TurboTest baseline reproduction and research-only analysis
+sql/                     M-Lab BigQuery extraction and feature engineering
+tests/                   Fast unit tests for causality, shapes, and gradient isolation
+docs/                    Architecture, data pipeline, experiment history, and report
 ```
+
+See [Main Workflow](scripts/README.md) for the supported path and
+[Experimental Scripts](experimental_scripts/README.md) for baseline and ablation utilities.
 
 Large datasets and checkpoints are intentionally excluded from Git. The public-data
 pipeline rebuilds them from M-Lab BigQuery exports.

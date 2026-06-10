@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build Stage 2 stop/continue labels from scored Stage 1 window predictions."""
+"""Build experimental Stage 2 labels from Stage 1 baseline predictions."""
 
 from __future__ import annotations
 

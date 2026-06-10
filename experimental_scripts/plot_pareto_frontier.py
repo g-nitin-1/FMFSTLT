@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Plot the TURBOTEST Stage 2 Pareto frontier from threshold sweep results.
 
-Reads threshold_sweep_all.json produced by rescore_stage2_thresholds.py
+Reads threshold_sweep_all.json produced by the experimental threshold rescorer
 and generates two figures:
 
   Figure A — full sweep curves (all thresholds, all epsilon):
@@ -14,8 +14,8 @@ and generates two figures:
       (mirrors paper Figure 3)
 
 Usage:
-    python3 scripts/plot_pareto_frontier.py
-    python3 scripts/plot_pareto_frontier.py --subset test --min-within-epsilon 0.7
+    python -m experimental_scripts.plot_pareto_frontier
+    python -m experimental_scripts.plot_pareto_frontier --subset test --min-within-epsilon 0.7
 """
 
 from __future__ import annotations

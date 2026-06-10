@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train and evaluate a paper-faithful Stage 2 Transformer stop-policy model."""
+"""Train and evaluate the experimental Stage 2 Transformer baseline."""
 
 from __future__ import annotations
 

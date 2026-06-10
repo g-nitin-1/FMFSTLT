@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize Stage 1 regression windows from normalized exact-public shards."""
+"""Materialize experimental Stage 1 regression windows from normalized shards."""
 
 from __future__ import annotations
 

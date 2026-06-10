@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the Stage 1 XGBoost regressor from Stage 1 window shards."""
+"""Train the experimental Stage 1 XGBoost baseline."""
 
 from __future__ import annotations
 

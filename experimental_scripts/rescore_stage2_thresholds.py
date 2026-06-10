@@ -7,7 +7,7 @@ policy-level metrics at each threshold. Results are saved as JSON for
 Pareto frontier plotting.
 
 Usage (WSL, CUDA):
-    python3 scripts/rescore_stage2_thresholds.py --device cuda
+    python -m experimental_scripts.rescore_stage2_thresholds --device cuda
 
 Outputs:
     artifacts_exact_public/stage2_threshold_sweep/threshold_sweep_eps_<N>.json
