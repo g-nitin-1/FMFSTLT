@@ -48,27 +48,27 @@ def split_one(input_csv: Path, output_root: Path, split: str) -> None:
 
     writers: dict[Path, tuple[object, csv.DictWriter]] = {}
     try:
-      with input_csv.open("r", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames is None:
-          raise ValueError(f"missing header in {input_csv}")
+        with input_csv.open("r", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None:
+                raise ValueError(f"missing header in {input_csv}")
 
-        for row in reader:
-          date_slug = row["date"].replace("-", "_")
-          file_tier = tier_slug(row["speed_tier"])
-          out_path = out_dir / f"{split}_{date_slug}_features_100ms_{file_tier}.csv"
+            for row in reader:
+                date_slug = row["date"].replace("-", "_")
+                file_tier = tier_slug(row["speed_tier"])
+                out_path = out_dir / f"{split}_{date_slug}_features_100ms_{file_tier}.csv"
 
-          if out_path not in writers:
-            out_handle = out_path.open("w", newline="")
-            writer = csv.DictWriter(out_handle, fieldnames=reader.fieldnames)
-            writer.writeheader()
-            writers[out_path] = (out_handle, writer)
+                if out_path not in writers:
+                    out_handle = out_path.open("w", newline="")
+                    writer = csv.DictWriter(out_handle, fieldnames=reader.fieldnames)
+                    writer.writeheader()
+                    writers[out_path] = (out_handle, writer)
 
-          _, writer = writers[out_path]
-          writer.writerow(row)
+                _, writer = writers[out_path]
+                writer.writerow(row)
     finally:
-      for out_handle, _ in writers.values():
-        out_handle.close()
+        for out_handle, _ in writers.values():
+            out_handle.close()
 
 
 def main() -> None:

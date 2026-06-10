@@ -1,10 +1,44 @@
-# Local tooling state
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Local configuration and credentials
+.env
+.env.*
 .gcloud/
 
-# Generated dataset exports
+# Generated datasets, checkpoints, and experiment outputs
+artifacts/
+artifacts_exact_public/
 exports/
 exports_exact_public/
 exports_exact_public_full/
-artifacts_exact_public/
+data/
+checkpoints/
+*.pt
+*.pth
 
+# Build products
+build/
+dist/
+*.aux
+*.log
+*.out
+*.toc
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Historical local scratch space
 extra/

@@ -29,46 +29,68 @@ if "TMPDIR" not in os.environ:
 import torch
 from torch import nn
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from foundation_model_twostage import (
-    FMNetTwoStage, FMNetTwoStageConfig, expm1_mbps,
+from fmfstlt.models.two_stage import (
+    FMNetTwoStage,
+    FMNetTwoStageConfig,
+    expm1_mbps,
 )
 
 try:
     from tqdm.auto import tqdm
 except ImportError:
+
     class tqdm:  # type: ignore
         def __init__(self, iterable=None, **kwargs):
             self.iterable = iterable
+
         def __iter__(self):
             return iter(self.iterable) if self.iterable is not None else iter(())
-        def set_postfix_str(self, *a, **k): pass
-        def close(self): pass
+
+        def set_postfix_str(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
 
 
 # Inline baseline Stage 2 Transformer (mirrors train_stage2_transformer.py:Stage2Transformer)
 class Stage2TransformerBaseline(nn.Module):
     def __init__(
-        self, *, max_sequence_buckets: int, feature_dim: int, d_model: int,
-        num_heads: int, num_layers: int, ff_dim: int, dropout: float, **kwargs,
+        self,
+        *,
+        max_sequence_buckets: int,
+        feature_dim: int,
+        d_model: int,
+        num_heads: int,
+        num_layers: int,
+        ff_dim: int,
+        dropout: float,
+        **kwargs,
     ) -> None:
         super().__init__()
         self.input_projection = nn.Linear(feature_dim, d_model)
         self.position_embedding = nn.Parameter(torch.zeros(1, max_sequence_buckets, d_model))
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=num_heads, dim_feedforward=ff_dim,
-            dropout=dropout, batch_first=True, norm_first=True, activation="gelu",
+            d_model=d_model,
+            nhead=num_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+            activation="gelu",
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.norm = nn.LayerNorm(d_model)
         self.head = nn.Sequential(
-            nn.Linear(d_model, d_model), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(d_model, 1),
         )
 
-    def forward(self, x_full: torch.Tensor, attention_mask: torch.Tensor,
-                history_lengths: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x_full: torch.Tensor, attention_mask: torch.Tensor, history_lengths: torch.Tensor
+    ) -> torch.Tensor:
         hidden = self.input_projection(x_full) + self.position_embedding[:, : x_full.shape[1], :]
         key_padding_mask = ~attention_mask.bool()
         hidden = self.encoder(hidden, src_key_padding_mask=key_padding_mask)
@@ -82,19 +104,27 @@ def parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parent.parent
     artifacts = root / "artifacts_exact_public"
     p = argparse.ArgumentParser()
-    p.add_argument("--foundation-checkpoint", type=Path,
-                   default=artifacts / "foundation_twostage_run3_cosine_ema/phase2_checkpoint.pt")
+    p.add_argument(
+        "--foundation-checkpoint",
+        type=Path,
+        default=artifacts / "foundation_twostage_run3_cosine_ema/phase2_checkpoint.pt",
+    )
     p.add_argument("--foundation-threshold", type=float, default=0.45)
-    p.add_argument("--baseline-checkpoint", type=Path,
-                   default=artifacts / "stage2_transformer_eps_10_local_gpu_bs1024_acc4/stage2_transformer_model.pt")
+    p.add_argument(
+        "--baseline-checkpoint",
+        type=Path,
+        default=artifacts
+        / "stage2_transformer_eps_10_local_gpu_bs1024_acc4/stage2_transformer_model.pt",
+    )
     p.add_argument("--baseline-threshold", type=float, default=0.25)
-    p.add_argument("--input-root", type=Path,
-                   default=artifacts / "stage2_transformer_dataset_eps_10")
-    p.add_argument("--output-root", type=Path,
-                   default=artifacts / "foundation_vs_baseline_multi_epsilon")
+    p.add_argument(
+        "--input-root", type=Path, default=artifacts / "stage2_transformer_dataset_eps_10"
+    )
+    p.add_argument(
+        "--output-root", type=Path, default=artifacts / "foundation_vs_baseline_multi_epsilon"
+    )
     p.add_argument("--subsets", nargs="+", default=["val", "test", "robustness"])
-    p.add_argument("--epsilons", nargs="+", type=float,
-                   default=[5, 10, 15, 20, 25, 30, 35])
+    p.add_argument("--epsilons", nargs="+", type=float, default=[5, 10, 15, 20, 25, 30, 35])
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     p.add_argument("--max-shards", type=int, default=None)
@@ -131,11 +161,11 @@ def load_baseline(ckpt_path: Path, device: torch.device):
 
 def collect_per_test(paths, foundation, baseline, device, batch_size):
     """For each test in the subset, gather:
-        - foundation stop_prob per decision [N, 20]
-        - foundation predicted throughput Mbps per decision [N, 20]
-        - baseline stop_prob per decision [N, 20]
-        - decision_valid_mask, decision_end_bucket, decision_elapsed_ms
-        - y_true_mbps per test [N], xgb_y_pred per decision [N, 20]
+    - foundation stop_prob per decision [N, 20]
+    - foundation predicted throughput Mbps per decision [N, 20]
+    - baseline stop_prob per decision [N, 20]
+    - decision_valid_mask, decision_end_bucket, decision_elapsed_ms
+    - y_true_mbps per test [N], xgb_y_pred per decision [N, 20]
     """
     fields = {
         "foundation_stop_prob": [],
@@ -180,8 +210,8 @@ def collect_per_test(paths, foundation, baseline, device, batch_size):
             n_pairs = len(test_idx)
             positions = np.arange(T, dtype=np.int32)
             for start in range(0, n_pairs, batch_size):
-                bt = test_idx[start: start + batch_size]
-                bd = dec_idx[start: start + batch_size]
+                bt = test_idx[start : start + batch_size]
+                bd = dec_idx[start : start + batch_size]
                 eb = decision_end_bucket[bt, bd]
                 hist_len = eb.astype(np.int32) + 1
                 attn_mask = (positions[None, :] < hist_len[:, None]).astype(np.uint8)
@@ -220,8 +250,9 @@ def select_stop_idx(stop_prob: np.ndarray, valid: np.ndarray, threshold: float) 
     return chosen
 
 
-def within_eps_at_stop(predictions: np.ndarray, y_true: np.ndarray,
-                       chosen_idx: np.ndarray, epsilons: list[float]) -> dict[str, float]:
+def within_eps_at_stop(
+    predictions: np.ndarray, y_true: np.ndarray, chosen_idx: np.ndarray, epsilons: list[float]
+) -> dict[str, float]:
     N = predictions.shape[0]
     rows = np.arange(N)
     valid_mask = chosen_idx >= 0
@@ -242,8 +273,10 @@ def main() -> None:
 
     foundation, _ = load_foundation(args.foundation_checkpoint, device)
     baseline, _ = load_baseline(args.baseline_checkpoint, device)
-    print(f"[loaded] foundation thr={args.foundation_threshold} | "
-          f"baseline thr={args.baseline_threshold} on {device}")
+    print(
+        f"[loaded] foundation thr={args.foundation_threshold} | "
+        f"baseline thr={args.baseline_threshold} on {device}"
+    )
 
     summary: dict = {
         "foundation_threshold": args.foundation_threshold,
@@ -264,26 +297,37 @@ def main() -> None:
 
         data = collect_per_test(paths, foundation, baseline, device, args.batch_size)
 
-        f_chosen = select_stop_idx(data["foundation_stop_prob"], data["decision_valid_mask"],
-                                    args.foundation_threshold)
-        b_chosen = select_stop_idx(data["baseline_stop_prob"], data["decision_valid_mask"],
-                                    args.baseline_threshold)
+        f_chosen = select_stop_idx(
+            data["foundation_stop_prob"], data["decision_valid_mask"], args.foundation_threshold
+        )
+        b_chosen = select_stop_idx(
+            data["baseline_stop_prob"], data["decision_valid_mask"], args.baseline_threshold
+        )
 
         y_true = data["y_true_mbps"]
 
-        f_with_f_pred = within_eps_at_stop(data["foundation_pred_mbps"], y_true, f_chosen, args.epsilons)
+        f_with_f_pred = within_eps_at_stop(
+            data["foundation_pred_mbps"], y_true, f_chosen, args.epsilons
+        )
         f_with_x_pred = within_eps_at_stop(data["xgb_y_pred"], y_true, f_chosen, args.epsilons)
         b_with_x_pred = within_eps_at_stop(data["xgb_y_pred"], y_true, b_chosen, args.epsilons)
-        b_with_f_pred = within_eps_at_stop(data["foundation_pred_mbps"], y_true, b_chosen, args.epsilons)
+        b_with_f_pred = within_eps_at_stop(
+            data["foundation_pred_mbps"], y_true, b_chosen, args.epsilons
+        )
 
         rows = np.arange(len(y_true))
         f_idx_safe = np.clip(f_chosen, 0, data["decision_elapsed_ms"].shape[1] - 1)
         b_idx_safe = np.clip(b_chosen, 0, data["decision_elapsed_ms"].shape[1] - 1)
-        last_valid_idx = np.array([
-            (np.flatnonzero(data["decision_valid_mask"][i])[-1]
-             if data["decision_valid_mask"][i].any() else 0)
-            for i in range(len(y_true))
-        ])
+        last_valid_idx = np.array(
+            [
+                (
+                    np.flatnonzero(data["decision_valid_mask"][i])[-1]
+                    if data["decision_valid_mask"][i].any()
+                    else 0
+                )
+                for i in range(len(y_true))
+            ]
+        )
         full_elapsed = data["decision_elapsed_ms"][rows, last_valid_idx]
         f_savings = float((full_elapsed - data["decision_elapsed_ms"][rows, f_idx_safe]).mean())
         b_savings = float((full_elapsed - data["decision_elapsed_ms"][rows, b_idx_safe]).mean())
@@ -298,8 +342,10 @@ def main() -> None:
             "baseline_stops_with_foundation_pred": b_with_f_pred,
         }
 
-        print(f"  tests={len(y_true)}  foundation savings={f_savings:.0f}ms  "
-              f"baseline savings={b_savings:.0f}ms  (Δ={f_savings-b_savings:+.0f})")
+        print(
+            f"  tests={len(y_true)}  foundation savings={f_savings:.0f}ms  "
+            f"baseline savings={b_savings:.0f}ms  (Δ={f_savings - b_savings:+.0f})"
+        )
         print()
         eps_hdr = "  epsilon" + " ".join(f"{int(e):>7}" for e in args.epsilons)
         print(eps_hdr)

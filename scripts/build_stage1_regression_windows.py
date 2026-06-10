@@ -6,15 +6,16 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 
 try:
     from tqdm.auto import tqdm
 except ImportError:
+
     class tqdm:  # type: ignore[override]
         def __init__(self, iterable=None, **kwargs) -> None:
             self.iterable = iterable
@@ -32,6 +33,7 @@ except ImportError:
 
         def close(self) -> None:
             return None
+
 
 WINDOW_DEFAULT = 20
 DEFAULT_SOURCE_SPLITS = ("train", "test", "robustness")
@@ -143,10 +145,12 @@ def load_split_map(split_path: Path) -> dict[str, str]:
     with np.load(split_path, allow_pickle=False) as data:
         uuids = data["uuid"].tolist()
         subsets = data["subset"].tolist()
-    return dict(zip(uuids, subsets))
+    return dict(zip(uuids, subsets, strict=True))
 
 
-def iter_source_paths(input_root: Path, source_splits: Iterable[str], input_glob: str | None) -> list[Path]:
+def iter_source_paths(
+    input_root: Path, source_splits: Iterable[str], input_glob: str | None
+) -> list[Path]:
     if input_glob:
         paths = sorted(input_root.glob(input_glob))
         if not paths:
@@ -379,7 +383,9 @@ def main() -> None:
                             )
 
     for (subset, source_split, source_shard_name), buffer in sorted(buffers.items()):
-        with np.load(args.input_root / source_split / f"{source_shard_name}.npz", allow_pickle=False) as data:
+        with np.load(
+            args.input_root / source_split / f"{source_shard_name}.npz", allow_pickle=False
+        ) as data:
             feature_names = data["feature_names"]
         manifest_entry = flush_buffer(
             buffer,
@@ -396,10 +402,7 @@ def main() -> None:
         )
         if manifest_entry is not None:
             manifest_entries.append(manifest_entry)
-            print(
-                f"built {manifest_entry['output_npz']} "
-                f"({manifest_entry['examples']} examples)"
-            )
+            print(f"built {manifest_entry['output_npz']} ({manifest_entry['examples']} examples)")
 
     shard_bar.close()
 

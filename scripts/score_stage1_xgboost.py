@@ -14,6 +14,7 @@ import xgboost as xgb
 try:
     from tqdm.auto import tqdm
 except ImportError:
+
     class tqdm:  # type: ignore[override]
         def __init__(self, iterable=None, **kwargs) -> None:
             self.iterable = iterable
@@ -28,6 +29,7 @@ except ImportError:
 
         def close(self) -> None:
             return None
+
 
 DEFAULT_SUBSETS = ("train", "val", "test", "robustness")
 
@@ -46,7 +48,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=root_dir / "artifacts_exact_public" / "stage1_xgboost" / "stage1_xgboost_model.json",
+        default=root_dir
+        / "artifacts_exact_public"
+        / "stage1_xgboost"
+        / "stage1_xgboost_model.json",
         help="Path to a trained Stage 1 XGBoost model.",
     )
     parser.add_argument(

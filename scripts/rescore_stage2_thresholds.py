@@ -35,6 +35,7 @@ from torch import nn
 try:
     from tqdm.auto import tqdm
 except ImportError:
+
     class tqdm:  # type: ignore[override]
         def __init__(self, iterable=None, **kwargs) -> None:
             self.iterable = iterable
@@ -57,6 +58,7 @@ DEFAULT_DATASET_PATTERN = "stage2_transformer_dataset_eps_{eps}"
 # ---------------------------------------------------------------------------
 # Model (must match train_stage2_transformer.py exactly)
 # ---------------------------------------------------------------------------
+
 
 class Stage2Transformer(nn.Module):
     def __init__(
@@ -110,48 +112,69 @@ class Stage2Transformer(nn.Module):
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args() -> argparse.Namespace:
     root_dir = Path(__file__).resolve().parent.parent
     artifacts = root_dir / "artifacts_exact_public"
-    p = argparse.ArgumentParser(description="Offline policy-level threshold sweep for Stage 2 models.")
+    p = argparse.ArgumentParser(
+        description="Offline policy-level threshold sweep for Stage 2 models."
+    )
     p.add_argument(
-        "--artifacts-root", type=Path, default=artifacts,
+        "--artifacts-root",
+        type=Path,
+        default=artifacts,
         help="Root that contains both model dirs and dataset dirs.",
     )
     p.add_argument(
-        "--output-root", type=Path,
+        "--output-root",
+        type=Path,
         default=artifacts / "stage2_threshold_sweep",
         help="Directory for per-epsilon sweep JSON files.",
     )
     p.add_argument(
-        "--epsilon-values", nargs="+", type=int, default=EPSILON_VALUES,
+        "--epsilon-values",
+        nargs="+",
+        type=int,
+        default=EPSILON_VALUES,
         help="Epsilon values to process.",
     )
     p.add_argument(
-        "--model-pattern", default=DEFAULT_MODEL_PATTERN,
+        "--model-pattern",
+        default=DEFAULT_MODEL_PATTERN,
         help="Dir name pattern with {eps} placeholder for model dirs.",
     )
     p.add_argument(
-        "--dataset-pattern", default=DEFAULT_DATASET_PATTERN,
+        "--dataset-pattern",
+        default=DEFAULT_DATASET_PATTERN,
         help="Dir name pattern with {eps} placeholder for dataset dirs.",
     )
     p.add_argument(
-        "--subsets", nargs="+", default=["val", "test"],
+        "--subsets",
+        nargs="+",
+        default=["val", "test"],
         help="Dataset subsets to evaluate.",
     )
     p.add_argument(
-        "--threshold-steps", type=int, default=99,
+        "--threshold-steps",
+        type=int,
+        default=99,
         help="Number of evenly-spaced thresholds from 0.01 to 0.99.",
     )
     p.add_argument(
-        "--batch-size", type=int, default=1024,
+        "--batch-size",
+        type=int,
+        default=1024,
         help="Inference batch size (decision points per forward pass).",
     )
     p.add_argument(
-        "--device", choices=("auto", "cpu", "cuda"), default="auto",
+        "--device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
     )
     p.add_argument(
-        "--max-eval-shards", type=int, default=None,
+        "--max-eval-shards",
+        type=int,
+        default=None,
         help="Optional shard limit for a quick probe.",
     )
     return p.parse_args()
@@ -160,6 +183,7 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def resolve_device(name: str) -> torch.device:
     if name == "cuda":
@@ -200,6 +224,7 @@ def safe_median(lst: list[float]) -> float | None:
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
+
 
 def collect_subset_predictions(
     model: nn.Module,
@@ -299,6 +324,7 @@ def collect_subset_predictions(
 # Policy metric computation
 # ---------------------------------------------------------------------------
 
+
 def compute_policy_at_threshold(
     preds: dict[str, np.ndarray],
     threshold: float,
@@ -314,7 +340,7 @@ def compute_policy_at_threshold(
     oracle_elapsed = preds["oracle_stop_elapsed_ms"]
 
     grouped: dict[tuple[str, str], list[int]] = {}
-    for i, key in enumerate(zip(uuid.tolist(), test_time.tolist())):
+    for i, key in enumerate(zip(uuid.tolist(), test_time.tolist(), strict=True)):
         grouped.setdefault(key, []).append(i)  # type: ignore[arg-type]
 
     emitted = 0
@@ -376,6 +402,7 @@ def compute_policy_at_threshold(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
@@ -395,9 +422,9 @@ def main() -> None:
             print(f"[skip eps={eps}] dataset dir not found: {dataset_dir}")
             continue
 
-        print(f"\n{'='*50}")
+        print(f"\n{'=' * 50}")
         print(f"epsilon = {eps}")
-        print(f"{'='*50}")
+        print(f"{'=' * 50}")
 
         model = load_model(model_dir, device)
         eps_result: dict[str, object] = {"epsilon": eps, "subsets": {}}
@@ -405,10 +432,22 @@ def main() -> None:
         for subset in args.subsets:
             print(f"\n  subset: {subset}")
             preds = collect_subset_predictions(
-                model, dataset_dir, subset, device,
-                args.batch_size, args.max_eval_shards,
+                model,
+                dataset_dir,
+                subset,
+                device,
+                args.batch_size,
+                args.max_eval_shards,
             )
-            n_tests = len(set(zip(preds["uuid"].tolist(), preds["test_time"].tolist())))
+            n_tests = len(
+                set(
+                    zip(
+                        preds["uuid"].tolist(),
+                        preds["test_time"].tolist(),
+                        strict=True,
+                    )
+                )
+            )
             n_decisions = len(preds["probabilities"])
             print(f"  {n_tests} tests, {n_decisions} decision points")
 

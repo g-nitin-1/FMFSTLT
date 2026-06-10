@@ -4,11 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -146,14 +145,10 @@ def infer_split(csv_path: Path, forced_split: str | None) -> str:
     parent = csv_path.parent.name
     if parent in DEFAULT_SPLITS:
         return parent
-    raise ValueError(
-        f"could not infer split for {csv_path}; pass --split explicitly"
-    )
+    raise ValueError(f"could not infer split for {csv_path}; pass --split explicitly")
 
 
-def iter_csv_files(
-    input_root: Path, splits: Iterable[str], input_glob: str | None
-) -> list[Path]:
+def iter_csv_files(input_root: Path, splits: Iterable[str], input_glob: str | None) -> list[Path]:
     if input_glob:
         return sorted(input_root.glob(input_glob))
 
@@ -215,9 +210,7 @@ def process_csv(csv_path: Path, output_root: Path, split: str, fill_policy: str)
         current_x[bucket] = feature_vector
         current_mask[bucket] = True
 
-    example = finalize_example(
-        current_uuid, current_metadata, current_x, current_mask, fill_policy
-    )
+    example = finalize_example(current_uuid, current_metadata, current_x, current_mask, fill_policy)
     if example is not None:
         examples.append(example)
 
@@ -273,10 +266,7 @@ def main() -> None:
         split = infer_split(csv_path, args.forced_split)
         entry = process_csv(csv_path, args.output_root, split, args.fill_policy)
         manifest.append(entry)
-        print(
-            f"built {entry['output_npz']} "
-            f"({entry['examples']} tests, {entry['rows']} rows)"
-        )
+        print(f"built {entry['output_npz']} ({entry['examples']} tests, {entry['rows']} rows)")
 
     summary = {
         "feature_names": FEATURE_COLUMNS,

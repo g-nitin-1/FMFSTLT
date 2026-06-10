@@ -13,6 +13,7 @@ import numpy as np
 try:
     from tqdm.auto import tqdm
 except ImportError:
+
     class tqdm:  # type: ignore[override]
         def __init__(self, iterable=None, total=None, **kwargs) -> None:
             self.iterable = iterable
@@ -107,7 +108,9 @@ def list_subset_paths(input_root: Path, subset: str, input_glob: str | None) -> 
     else:
         paths = sorted(subset_dir.glob("*.npz"))
     if not paths:
-        raise SystemExit(f"no Stage 1 prediction shards found for subset {subset} under {subset_dir}")
+        raise SystemExit(
+            f"no Stage 1 prediction shards found for subset {subset} under {subset_dir}"
+        )
     return paths
 
 
@@ -117,9 +120,9 @@ def compute_errors(
     relative_denominator_floor: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     abs_error = np.abs(y_pred - y_true).astype(np.float32, copy=False)
-    relative_error = (
-        abs_error / np.maximum(np.abs(y_true), relative_denominator_floor)
-    ).astype(np.float32, copy=False)
+    relative_error = (abs_error / np.maximum(np.abs(y_true), relative_denominator_floor)).astype(
+        np.float32, copy=False
+    )
     return abs_error, relative_error
 
 
@@ -225,7 +228,7 @@ def build_oracle_map(
                 relative_epsilon_unit=relative_epsilon_unit,
             )
 
-            for idx, (uuid, test_time) in enumerate(zip(uuids, test_times)):
+            for idx, (uuid, test_time) in enumerate(zip(uuids, test_times, strict=True)):
                 key = (uuid, test_time)
                 record = oracle_map.get(key)
                 if record is None:
@@ -260,7 +263,9 @@ def build_oracle_map(
                         record.candidate_stop_found = True
                         record.candidate_stop_end_bucket = current_end_bucket
                         record.candidate_stop_elapsed_ms = int(elapsed_ms[idx])
-                        record.candidate_stop_observed_buckets_seen = int(observed_buckets_seen[idx])
+                        record.candidate_stop_observed_buckets_seen = int(
+                            observed_buckets_seen[idx]
+                        )
                         record.candidate_stop_abs_error_mbps = float(abs_error[idx])
                         record.candidate_stop_relative_error = float(relative_error[idx])
                 else:
@@ -306,12 +311,8 @@ def write_oracle_index_file(
             [record.last_observed_bucket for record in records], dtype=np.int16
         ),
         num_windows=np.array([record.num_windows for record in records], dtype=np.int16),
-        final_end_bucket=np.array(
-            [record.final_end_bucket for record in records], dtype=np.int16
-        ),
-        final_elapsed_ms=np.array(
-            [record.final_elapsed_ms for record in records], dtype=np.int32
-        ),
+        final_end_bucket=np.array([record.final_end_bucket for record in records], dtype=np.int16),
+        final_elapsed_ms=np.array([record.final_elapsed_ms for record in records], dtype=np.int32),
         final_observed_buckets_seen=np.array(
             [record.final_observed_buckets_seen for record in records], dtype=np.int16
         ),
@@ -350,15 +351,15 @@ def write_oracle_index_file(
     return out_path
 
 
-def summarize_oracle_map(oracle_map: dict[tuple[str, str], OracleRecord]) -> dict[str, float | int | None]:
+def summarize_oracle_map(
+    oracle_map: dict[tuple[str, str], OracleRecord],
+) -> dict[str, float | int | None]:
     records = list(oracle_map.values())
     found_records = [record for record in records if record.oracle_stop_found]
     return {
         "tests": len(records),
         "tests_with_oracle_stop": len(found_records),
-        "oracle_stop_rate": (
-            float(len(found_records) / len(records)) if records else 0.0
-        ),
+        "oracle_stop_rate": (float(len(found_records) / len(records)) if records else 0.0),
         "mean_oracle_elapsed_ms": safe_mean(
             [record.oracle_stop_elapsed_ms for record in found_records]
         ),
@@ -427,18 +428,26 @@ def write_label_shards(
             oracle_stop_found = np.zeros_like(instantaneous_safe_mask, dtype=np.uint8)
             oracle_stop_end_bucket = np.full(instantaneous_safe_mask.shape, -1, dtype=np.int16)
             oracle_stop_elapsed_ms = np.full(instantaneous_safe_mask.shape, -1, dtype=np.int32)
-            oracle_stop_observed_buckets_seen = np.full(instantaneous_safe_mask.shape, -1, dtype=np.int16)
-            oracle_stop_abs_error_mbps = np.full(instantaneous_safe_mask.shape, np.nan, dtype=np.float32)
-            oracle_stop_relative_error = np.full(instantaneous_safe_mask.shape, np.nan, dtype=np.float32)
+            oracle_stop_observed_buckets_seen = np.full(
+                instantaneous_safe_mask.shape, -1, dtype=np.int16
+            )
+            oracle_stop_abs_error_mbps = np.full(
+                instantaneous_safe_mask.shape, np.nan, dtype=np.float32
+            )
+            oracle_stop_relative_error = np.full(
+                instantaneous_safe_mask.shape, np.nan, dtype=np.float32
+            )
             is_oracle_stop_window = np.zeros_like(instantaneous_safe_mask, dtype=np.uint8)
 
-            for idx, (uuid, test_time) in enumerate(zip(uuids, test_times)):
+            for idx, (uuid, test_time) in enumerate(zip(uuids, test_times, strict=True)):
                 record = oracle_map[(uuid, test_time)]
                 if record.oracle_stop_found:
                     oracle_stop_found[idx] = 1
                     oracle_stop_end_bucket[idx] = record.oracle_stop_end_bucket
                     oracle_stop_elapsed_ms[idx] = record.oracle_stop_elapsed_ms
-                    oracle_stop_observed_buckets_seen[idx] = record.oracle_stop_observed_buckets_seen
+                    oracle_stop_observed_buckets_seen[idx] = (
+                        record.oracle_stop_observed_buckets_seen
+                    )
                     oracle_stop_abs_error_mbps[idx] = record.oracle_stop_abs_error_mbps
                     oracle_stop_relative_error[idx] = record.oracle_stop_relative_error
                     if int(end_bucket[idx]) >= record.oracle_stop_end_bucket:
@@ -521,9 +530,7 @@ def main() -> None:
     effective_relative_epsilon_fraction = (
         (args.epsilon / 100.0)
         if args.error_kind == "relative" and args.relative_epsilon_unit == "percent"
-        else (
-            args.epsilon if args.error_kind == "relative" else None
-        )
+        else (args.epsilon if args.error_kind == "relative" else None)
     )
 
     overall_summary = {

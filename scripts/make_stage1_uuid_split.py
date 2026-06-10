@@ -68,7 +68,12 @@ def main() -> None:
             uuids = data["uuid"]
             speed_tiers = data["speed_tier"]
             dates = data["date"]
-            for uuid, speed_tier, date in zip(uuids.tolist(), speed_tiers.tolist(), dates.tolist()):
+            for uuid, speed_tier, date in zip(
+                uuids.tolist(),
+                speed_tiers.tolist(),
+                dates.tolist(),
+                strict=True,
+            ):
                 if uuid in uuid_to_tier:
                     if uuid_to_tier[uuid] != speed_tier:
                         raise ValueError(
@@ -111,8 +116,12 @@ def main() -> None:
         }
 
     ordered_uuids = np.array(sorted(assignments), dtype=np.str_)
-    ordered_subsets = np.array([assignments[uuid] for uuid in ordered_uuids.tolist()], dtype=np.str_)
-    ordered_tiers = np.array([uuid_to_speed_tier[uuid] for uuid in ordered_uuids.tolist()], dtype=np.str_)
+    ordered_subsets = np.array(
+        [assignments[uuid] for uuid in ordered_uuids.tolist()], dtype=np.str_
+    )
+    ordered_tiers = np.array(
+        [uuid_to_speed_tier[uuid] for uuid in ordered_uuids.tolist()], dtype=np.str_
+    )
     ordered_dates = np.array([uuid_to_date[uuid] for uuid in ordered_uuids.tolist()], dtype=np.str_)
 
     args.output_path.parent.mkdir(parents=True, exist_ok=True)

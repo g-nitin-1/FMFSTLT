@@ -28,9 +28,11 @@ import numpy as np
 
 try:
     import matplotlib
+
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     import matplotlib.cm as cm
+    import matplotlib.pyplot as plt
+
     HAS_MPL = True
 except ImportError:
     HAS_MPL = False
@@ -44,19 +46,24 @@ def parse_args() -> argparse.Namespace:
     artifacts = root_dir / "artifacts_exact_public"
     p = argparse.ArgumentParser(description="Plot Pareto frontier from Stage 2 threshold sweep.")
     p.add_argument(
-        "--sweep-path", type=Path,
+        "--sweep-path",
+        type=Path,
         default=artifacts / "stage2_threshold_sweep" / "threshold_sweep_all.json",
     )
     p.add_argument(
-        "--output-dir", type=Path,
+        "--output-dir",
+        type=Path,
         default=artifacts / "stage2_threshold_sweep",
     )
     p.add_argument(
-        "--subset", default="test",
+        "--subset",
+        default="test",
         help="Which subset's results to plot (val or test).",
     )
     p.add_argument(
-        "--min-emitted-stop-rate", type=float, default=0.05,
+        "--min-emitted-stop-rate",
+        type=float,
+        default=0.05,
         help=(
             "Minimum fraction of tests that must emit an early stop for a "
             "threshold to be included in the Pareto selection. Prevents "
@@ -64,14 +71,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--x-axis", choices=("median_pct_data_transferred", "mean_pct_data_transferred",
-                             "median_stop_elapsed_ms", "mean_stop_elapsed_ms"),
+        "--x-axis",
+        choices=(
+            "median_pct_data_transferred",
+            "mean_pct_data_transferred",
+            "median_stop_elapsed_ms",
+            "mean_stop_elapsed_ms",
+        ),
         default="median_pct_data_transferred",
         help="X-axis metric.",
     )
     p.add_argument(
-        "--y-axis", choices=("within_epsilon_rate", "mean_relative_error_at_stop",
-                             "median_relative_error_at_stop"),
+        "--y-axis",
+        choices=(
+            "within_epsilon_rate",
+            "mean_relative_error_at_stop",
+            "median_relative_error_at_stop",
+        ),
         default="within_epsilon_rate",
         help="Y-axis metric.",
     )
@@ -119,11 +135,15 @@ def print_summary_table(
     y_field: str,
     subset: str,
 ) -> None:
-    print(f"\n{'='*70}")
-    print(f"Pareto frontier summary  |  subset={subset}  |  min_emitted={min_emitted_stop_rate:.2f}")
-    print(f"{'='*70}")
-    print(f"{'eps':>5}  {'threshold':>10}  {'emitted%':>9}  {'within_eps%':>12}  {'med_%xfer':>10}  {'med_savings_s':>14}")
-    print(f"{'-'*70}")
+    print(f"\n{'=' * 70}")
+    print(
+        f"Pareto frontier summary  |  subset={subset}  |  min_emitted={min_emitted_stop_rate:.2f}"
+    )
+    print(f"{'=' * 70}")
+    print(
+        f"{'eps':>5}  {'threshold':>10}  {'emitted%':>9}  {'within_eps%':>12}  {'med_%xfer':>10}  {'med_savings_s':>14}"
+    )
+    print(f"{'-' * 70}")
     for eps in sorted(sweep_by_eps.keys()):
         pt = select_pareto_point(sweep_by_eps[eps], min_emitted_stop_rate, x_field, y_field)
         if pt is None:
@@ -132,17 +152,17 @@ def print_summary_table(
         med_save = pt.get("median_savings_vs_full_ms")
         print(
             f"{eps:>5}  {pt['threshold']:>10.3f}  "
-            f"{pt['emitted_stop_rate']*100:>8.1f}%  "
-            f"{pt['within_epsilon_rate']*100:>11.1f}%  "
-            f"{(med_xfer or 0)*100:>9.1f}%  "
-            f"{(med_save or 0)/1000:>13.2f}s"
+            f"{pt['emitted_stop_rate'] * 100:>8.1f}%  "
+            f"{pt['within_epsilon_rate'] * 100:>11.1f}%  "
+            f"{(med_xfer or 0) * 100:>9.1f}%  "
+            f"{(med_save or 0) / 1000:>13.2f}s"
         )
     print()
 
     # full sweep info for each epsilon
     print(f"\nFull sweep range per epsilon (subset={subset}):")
     print(f"{'eps':>5}  {'thresholds':>10}  {'max_within_eps%':>16}  {'at_emitted_rate':>16}")
-    print(f"{'-'*55}")
+    print(f"{'-' * 55}")
     for eps in sorted(sweep_by_eps.keys()):
         sweep = sweep_by_eps[eps]
         max_within = max(pt["within_epsilon_rate"] for pt in sweep)
@@ -150,8 +170,8 @@ def print_summary_table(
         best_pt = max(sweep, key=lambda pt: pt["within_epsilon_rate"])
         print(
             f"{eps:>5}  {len(sweep):>10}  "
-            f"{max_within*100:>15.1f}%  "
-            f"thr={best_pt['threshold']:.2f} emit={best_pt['emitted_stop_rate']*100:.1f}%"
+            f"{max_within * 100:>15.1f}%  "
+            f"thr={best_pt['threshold']:.2f} emit={best_pt['emitted_stop_rate'] * 100:.1f}%"
         )
 
 
@@ -170,7 +190,7 @@ def plot_sweep_curves(
     fig, ax = plt.subplots(figsize=(9, 6))
     colors = cm.viridis(np.linspace(0.1, 0.9, len(EPSILON_VALUES)))
 
-    for color, eps in zip(colors, EPSILON_VALUES):
+    for color, eps in zip(colors, EPSILON_VALUES, strict=True):
         if eps not in sweep_by_eps:
             continue
         sweep = sweep_by_eps[eps]
@@ -181,12 +201,22 @@ def plot_sweep_curves(
         # mark the selected Pareto point
         pt = select_pareto_point(sweep, min_emitted_stop_rate, x_field, y_field)
         if pt and pt[x_field] is not None:
-            ax.plot(pt[x_field], pt[y_field], "*", color=color, markersize=14,
-                    markeredgecolor="black", markeredgewidth=0.5, zorder=5)
+            ax.plot(
+                pt[x_field],
+                pt[y_field],
+                "*",
+                color=color,
+                markersize=14,
+                markeredgecolor="black",
+                markeredgewidth=0.5,
+                zorder=5,
+            )
 
     ax.set_xlabel(_axis_label(x_field), fontsize=12)
     ax.set_ylabel(_axis_label(y_field), fontsize=12)
-    ax.set_title(f"Stage 2 Threshold Sweep — {subset} set\n(★ = selected operating point)", fontsize=13)
+    ax.set_title(
+        f"Stage 2 Threshold Sweep — {subset} set\n(★ = selected operating point)", fontsize=13
+    )
     ax.legend(loc="best", fontsize=9)
     ax.grid(True, alpha=0.3)
     if "pct" in x_field:
@@ -217,7 +247,7 @@ def plot_pareto_frontier(
     colors = cm.viridis(np.linspace(0.1, 0.9, len(EPSILON_VALUES)))
 
     xs_pareto, ys_pareto, labels_pareto = [], [], []
-    for color, eps in zip(colors, EPSILON_VALUES):
+    for color, eps in zip(colors, EPSILON_VALUES, strict=True):
         if eps not in sweep_by_eps:
             continue
         pt = select_pareto_point(sweep_by_eps[eps], min_emitted_stop_rate, x_field, y_field)
@@ -226,10 +256,16 @@ def plot_pareto_frontier(
         xs_pareto.append(pt[x_field])
         ys_pareto.append(pt[y_field])
         labels_pareto.append(f"ε={eps}%")
-        ax.scatter(pt[x_field], pt[y_field], color=color, s=100, zorder=5,
-                   edgecolors="black", linewidths=0.5)
-        ax.annotate(f" ε={eps}%", (pt[x_field], pt[y_field]),
-                    fontsize=8, va="center")
+        ax.scatter(
+            pt[x_field],
+            pt[y_field],
+            color=color,
+            s=100,
+            zorder=5,
+            edgecolors="black",
+            linewidths=0.5,
+        )
+        ax.annotate(f" ε={eps}%", (pt[x_field], pt[y_field]), fontsize=8, va="center")
 
     # draw the frontier line (sorted by x)
     if xs_pareto:
@@ -237,7 +273,10 @@ def plot_pareto_frontier(
         ax.plot(
             [xs_pareto[i] for i in order],
             [ys_pareto[i] for i in order],
-            "--", color="gray", alpha=0.5, zorder=1,
+            "--",
+            color="gray",
+            alpha=0.5,
+            zorder=1,
         )
 
     ax.set_xlabel(_axis_label(x_field), fontsize=12)
@@ -293,8 +332,7 @@ def main() -> None:
 
     if not args.sweep_path.exists():
         raise SystemExit(
-            f"sweep file not found: {args.sweep_path}\n"
-            "Run rescore_stage2_thresholds.py first."
+            f"sweep file not found: {args.sweep_path}\nRun rescore_stage2_thresholds.py first."
         )
 
     sweep_by_eps = load_sweep(args.sweep_path, args.subset)

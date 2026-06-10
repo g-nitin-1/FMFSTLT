@@ -30,34 +30,35 @@ if "TMPDIR" not in os.environ:
 
 import torch
 from torch import nn
-from torch.utils.data import IterableDataset, DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from foundation_model_v3 import FMNetV3, FMNetV3Config
+from fmfstlt.models.fmnet_v3 import FMNetV3, FMNetV3Config
 
 try:
     from tqdm.auto import tqdm
 except ImportError:
+
     class tqdm:  # type: ignore
         def __init__(self, iterable=None, **kwargs):
             self.iterable = iterable
+
         def __iter__(self):
             return iter(self.iterable) if self.iterable is not None else iter(())
-        def set_postfix(self, *a, **k): pass
-        def close(self): pass
+
+        def set_postfix(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
 
 
 def parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parent.parent
     artifacts = root / "artifacts_exact_public"
     p = argparse.ArgumentParser(description="Causal next-bucket pretraining for FMNet v3")
-    p.add_argument("--normalized-root", type=Path,
-                   default=artifacts / "normalized_shards")
-    p.add_argument("--split-path", type=Path,
-                   default=artifacts / "stage1_uuid_split.npz")
-    p.add_argument("--output-root", type=Path,
-                   default=artifacts / "foundation_v3_pretrain")
+    p.add_argument("--normalized-root", type=Path, default=artifacts / "normalized_shards")
+    p.add_argument("--split-path", type=Path, default=artifacts / "stage1_uuid_split.npz")
+    p.add_argument("--output-root", type=Path, default=artifacts / "foundation_v3_pretrain")
     p.add_argument("--source-splits", nargs="+", default=["train"])
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=256)
@@ -65,8 +66,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight-decay", type=float, default=0.02)
     p.add_argument("--warmup-steps", type=int, default=500)
     p.add_argument("--clip-grad-norm", type=float, default=1.0)
-    p.add_argument("--feature-dropout", type=float, default=0.05,
-                   help="Probability of zeroing a bucket vector before encoding (regularization).")
+    p.add_argument(
+        "--feature-dropout",
+        type=float,
+        default=0.05,
+        help="Probability of zeroing a bucket vector before encoding (regularization).",
+    )
     p.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     p.add_argument("--seed", type=int, default=1337)
     p.add_argument("--num-workers", type=int, default=2)
@@ -103,7 +108,7 @@ def load_train_uuid_set(split_path: Path) -> set[str]:
     with np.load(split_path, allow_pickle=False) as data:
         uuids = data["uuid"].tolist()
         subsets = data["subset"].tolist()
-    return {u for u, s in zip(uuids, subsets) if s == "train"}
+    return {u for u, s in zip(uuids, subsets, strict=True) if s == "train"}
 
 
 def list_shards(normalized_root: Path, splits: list[str]) -> list[Path]:
@@ -138,7 +143,7 @@ class NormalizedShardIterable(IterableDataset):
             paths = list(self.shard_paths)
             rng_seed = self.seed
         else:
-            paths = self.shard_paths[worker.id::worker.num_workers]
+            paths = self.shard_paths[worker.id :: worker.num_workers]
             rng_seed = self.seed + worker.id
         rng = np.random.default_rng(rng_seed)
         rng.shuffle(paths)
@@ -206,7 +211,7 @@ def main() -> None:
     )
     model = FMNetV3(cfg).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"[pretrain] FMNet v3 with {n_params/1e6:.2f}M parameters on {device}")
+    print(f"[pretrain] FMNet v3 with {n_params / 1e6:.2f}M parameters on {device}")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -240,9 +245,9 @@ def main() -> None:
                 g["lr"] = lr_at_step(global_step, args.learning_rate, args.warmup_steps)
 
             out = model.forward_pretrain(x)
-            pred = out["next_bucket_pred"][:, :-1, :]   # [B, T-1, F]
-            target = x[:, 1:, :]                         # [B, T-1, F]
-            target_mask = bm[:, 1:].unsqueeze(-1)        # [B, T-1, 1]
+            pred = out["next_bucket_pred"][:, :-1, :]  # [B, T-1, F]
+            target = x[:, 1:, :]  # [B, T-1, F]
+            target_mask = bm[:, 1:].unsqueeze(-1)  # [B, T-1, 1]
             loss_per_elem = criterion(pred, target) * target_mask
             denom = target_mask.sum() * pred.shape[-1]
             loss = loss_per_elem.sum() / denom.clamp_min(1.0)
@@ -257,18 +262,28 @@ def main() -> None:
             epoch_count += 1
             global_step += 1
             if epoch_count % 50 == 0:
-                bar.set_postfix(loss=f"{epoch_loss_sum / max(1, epoch_count):.4f}",
-                                step=global_step)
-            if (args.max_train_batches_per_epoch is not None
-                    and epoch_count >= args.max_train_batches_per_epoch):
+                bar.set_postfix(
+                    loss=f"{epoch_loss_sum / max(1, epoch_count):.4f}", step=global_step
+                )
+            if (
+                args.max_train_batches_per_epoch is not None
+                and epoch_count >= args.max_train_batches_per_epoch
+            ):
                 break
         bar.close()
         avg = epoch_loss_sum / max(1, epoch_count)
         elapsed = time.time() - t0
-        rec = {"epoch": epoch, "avg_loss": avg, "batches": epoch_count, "elapsed_s": elapsed,
-               "global_step": global_step}
-        print(f"[pretrain] epoch {epoch}: avg_loss={avg:.4f}, batches={epoch_count}, "
-              f"time={elapsed:.0f}s")
+        rec = {
+            "epoch": epoch,
+            "avg_loss": avg,
+            "batches": epoch_count,
+            "elapsed_s": elapsed,
+            "global_step": global_step,
+        }
+        print(
+            f"[pretrain] epoch {epoch}: avg_loss={avg:.4f}, batches={epoch_count}, "
+            f"time={elapsed:.0f}s"
+        )
         history.append(rec)
         log_f.write(json.dumps(rec) + "\n")
         log_f.flush()

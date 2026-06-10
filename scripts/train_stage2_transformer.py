@@ -30,6 +30,7 @@ except ImportError:
 try:
     from tqdm.auto import tqdm
 except ImportError:
+
     class tqdm:  # type: ignore[override]
         def __init__(self, iterable=None, total=None, **kwargs) -> None:
             self.iterable = iterable
@@ -171,7 +172,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--selection-metric",
-        choices=("f1", "balanced_accuracy", "accuracy", "precision", "recall", "auroc", "average_precision"),
+        choices=(
+            "f1",
+            "balanced_accuracy",
+            "accuracy",
+            "precision",
+            "recall",
+            "auroc",
+            "average_precision",
+        ),
         default="f1",
         help="Validation metric used to choose the best epoch.",
     )
@@ -324,7 +333,9 @@ def safe_median(values: list[float]) -> float | None:
     return float(np.median(np.asarray(values, dtype=np.float64)))
 
 
-def confusion_from_predictions(labels: np.ndarray, predictions: np.ndarray) -> tuple[int, int, int, int]:
+def confusion_from_predictions(
+    labels: np.ndarray, predictions: np.ndarray
+) -> tuple[int, int, int, int]:
     labels_bool = labels.astype(bool, copy=False)
     preds_bool = predictions.astype(bool, copy=False)
     tp = int(np.logical_and(labels_bool, preds_bool).sum())
@@ -334,7 +345,9 @@ def confusion_from_predictions(labels: np.ndarray, predictions: np.ndarray) -> t
     return tp, fp, tn, fn
 
 
-def compute_window_metrics(labels: np.ndarray, probabilities: np.ndarray, threshold: float) -> dict[str, float | int | None]:
+def compute_window_metrics(
+    labels: np.ndarray, probabilities: np.ndarray, threshold: float
+) -> dict[str, float | int | None]:
     predictions = probabilities >= threshold
     tp, fp, tn, fn = confusion_from_predictions(labels, predictions)
     precision = safe_divide(tp, tp + fp)
@@ -372,7 +385,9 @@ def compute_window_metrics(labels: np.ndarray, probabilities: np.ndarray, thresh
     }
 
 
-def threshold_metric_value(metric_name: str, labels: np.ndarray, probabilities: np.ndarray, threshold: float) -> float:
+def threshold_metric_value(
+    metric_name: str, labels: np.ndarray, probabilities: np.ndarray, threshold: float
+) -> float:
     metrics = compute_window_metrics(labels, probabilities, threshold)
     value = metrics.get(metric_name)
     if value is None:
@@ -380,21 +395,29 @@ def threshold_metric_value(metric_name: str, labels: np.ndarray, probabilities: 
     return float(value)
 
 
-def choose_threshold(args: argparse.Namespace, labels: np.ndarray, probabilities: np.ndarray) -> tuple[float, float]:
+def choose_threshold(
+    args: argparse.Namespace, labels: np.ndarray, probabilities: np.ndarray
+) -> tuple[float, float]:
     if args.decision_threshold is not None:
         threshold = float(args.decision_threshold)
-        return threshold, threshold_metric_value(args.threshold_metric, labels, probabilities, threshold)
+        return threshold, threshold_metric_value(
+            args.threshold_metric, labels, probabilities, threshold
+        )
 
     candidates = (
         np.array([0.5], dtype=np.float64)
         if args.threshold_steps <= 1
-        else np.linspace(args.threshold_min, args.threshold_max, args.threshold_steps, dtype=np.float64)
+        else np.linspace(
+            args.threshold_min, args.threshold_max, args.threshold_steps, dtype=np.float64
+        )
     )
 
     best_threshold = float(candidates[0])
     best_score = float("-inf")
     for threshold in candidates.tolist():
-        score = threshold_metric_value(args.threshold_metric, labels, probabilities, float(threshold))
+        score = threshold_metric_value(
+            args.threshold_metric, labels, probabilities, float(threshold)
+        )
         if score > best_score:
             best_threshold = float(threshold)
             best_score = float(score)
@@ -552,8 +575,12 @@ def train_one_epoch(
             rng=rng,
         ):
             inputs = torch.from_numpy(batch["x_full"]).to(device=device, dtype=torch.float32)
-            attention_mask = torch.from_numpy(batch["attention_mask"]).to(device=device, dtype=torch.bool)
-            history_lengths = torch.from_numpy(batch["history_lengths"]).to(device=device, dtype=torch.long)
+            attention_mask = torch.from_numpy(batch["attention_mask"]).to(
+                device=device, dtype=torch.bool
+            )
+            history_lengths = torch.from_numpy(batch["history_lengths"]).to(
+                device=device, dtype=torch.long
+            )
             targets = torch.from_numpy(batch["labels"]).to(device=device, dtype=torch.float32)
 
             logits = model(inputs, attention_mask, history_lengths)
@@ -646,8 +673,12 @@ def predict_subset(
                 rng=np.random.default_rng(0),
             ):
                 inputs = torch.from_numpy(batch["x_full"]).to(device=device, dtype=torch.float32)
-                attention_mask = torch.from_numpy(batch["attention_mask"]).to(device=device, dtype=torch.bool)
-                history_lengths = torch.from_numpy(batch["history_lengths"]).to(device=device, dtype=torch.long)
+                attention_mask = torch.from_numpy(batch["attention_mask"]).to(
+                    device=device, dtype=torch.bool
+                )
+                history_lengths = torch.from_numpy(batch["history_lengths"]).to(
+                    device=device, dtype=torch.long
+                )
                 targets = torch.from_numpy(batch["labels"]).to(device=device, dtype=torch.float32)
 
                 logits = model(inputs, attention_mask, history_lengths)
@@ -691,23 +722,49 @@ def predict_subset(
         "loss": safe_divide(total_loss, total_examples),
         "examples": total_examples,
         "batches": batch_count,
-        "probabilities": np.concatenate(probabilities_list, axis=0) if probabilities_list else np.empty((0,), dtype=np.float32),
-        "labels": np.concatenate(labels_list, axis=0) if labels_list else np.empty((0,), dtype=np.float32),
-        "instantaneous_safe_window": np.concatenate(instantaneous_safe_list, axis=0) if instantaneous_safe_list else np.empty((0,), dtype=np.uint8),
-        "stop_label": np.concatenate(stop_label_list, axis=0) if stop_label_list else np.empty((0,), dtype=np.uint8),
+        "probabilities": np.concatenate(probabilities_list, axis=0)
+        if probabilities_list
+        else np.empty((0,), dtype=np.float32),
+        "labels": np.concatenate(labels_list, axis=0)
+        if labels_list
+        else np.empty((0,), dtype=np.float32),
+        "instantaneous_safe_window": np.concatenate(instantaneous_safe_list, axis=0)
+        if instantaneous_safe_list
+        else np.empty((0,), dtype=np.uint8),
+        "stop_label": np.concatenate(stop_label_list, axis=0)
+        if stop_label_list
+        else np.empty((0,), dtype=np.uint8),
         "uuid": np.concatenate(uuid_list, axis=0) if uuid_list else np.empty((0,), dtype=np.str_),
-        "test_time": np.concatenate(test_time_list, axis=0) if test_time_list else np.empty((0,), dtype=np.str_),
-        "end_bucket": np.concatenate(end_bucket_list, axis=0) if end_bucket_list else np.empty((0,), dtype=np.int16),
-        "elapsed_ms": np.concatenate(elapsed_ms_list, axis=0) if elapsed_ms_list else np.empty((0,), dtype=np.int32),
-        "y_true_mbps": np.concatenate(y_true_list, axis=0) if y_true_list else np.empty((0,), dtype=np.float32),
-        "y_pred_mbps": np.concatenate(y_pred_list, axis=0) if y_pred_list else np.empty((0,), dtype=np.float32),
-        "relative_error": np.concatenate(relative_error_list, axis=0) if relative_error_list else np.empty((0,), dtype=np.float32),
-        "oracle_stop_found": np.concatenate(oracle_stop_found_list, axis=0) if oracle_stop_found_list else np.empty((0,), dtype=np.uint8),
-        "oracle_stop_elapsed_ms": np.concatenate(oracle_stop_elapsed_ms_list, axis=0) if oracle_stop_elapsed_ms_list else np.empty((0,), dtype=np.int32),
+        "test_time": np.concatenate(test_time_list, axis=0)
+        if test_time_list
+        else np.empty((0,), dtype=np.str_),
+        "end_bucket": np.concatenate(end_bucket_list, axis=0)
+        if end_bucket_list
+        else np.empty((0,), dtype=np.int16),
+        "elapsed_ms": np.concatenate(elapsed_ms_list, axis=0)
+        if elapsed_ms_list
+        else np.empty((0,), dtype=np.int32),
+        "y_true_mbps": np.concatenate(y_true_list, axis=0)
+        if y_true_list
+        else np.empty((0,), dtype=np.float32),
+        "y_pred_mbps": np.concatenate(y_pred_list, axis=0)
+        if y_pred_list
+        else np.empty((0,), dtype=np.float32),
+        "relative_error": np.concatenate(relative_error_list, axis=0)
+        if relative_error_list
+        else np.empty((0,), dtype=np.float32),
+        "oracle_stop_found": np.concatenate(oracle_stop_found_list, axis=0)
+        if oracle_stop_found_list
+        else np.empty((0,), dtype=np.uint8),
+        "oracle_stop_elapsed_ms": np.concatenate(oracle_stop_elapsed_ms_list, axis=0)
+        if oracle_stop_elapsed_ms_list
+        else np.empty((0,), dtype=np.int32),
     }
 
 
-def compute_policy_metrics(outputs: dict[str, object], threshold: float) -> dict[str, float | int | None]:
+def compute_policy_metrics(
+    outputs: dict[str, object], threshold: float
+) -> dict[str, float | int | None]:
     probabilities = np.asarray(outputs["probabilities"], dtype=np.float32)
     uuid = np.asarray(outputs["uuid"])
     test_time = np.asarray(outputs["test_time"])
@@ -721,7 +778,7 @@ def compute_policy_metrics(outputs: dict[str, object], threshold: float) -> dict
     oracle_stop_elapsed_ms = np.asarray(outputs["oracle_stop_elapsed_ms"], dtype=np.int32)
 
     grouped_rows: dict[tuple[str, str], list[int]] = {}
-    for idx, key in enumerate(zip(uuid.tolist(), test_time.tolist())):
+    for idx, key in enumerate(zip(uuid.tolist(), test_time.tolist(), strict=True)):
         grouped_rows.setdefault(key, []).append(idx)
 
     emitted_stops = 0
@@ -759,7 +816,9 @@ def compute_policy_metrics(outputs: dict[str, object], threshold: float) -> dict
 
         if int(oracle_stop_found[row_indices[0]]) == 1:
             oracle_tests += 1
-            excess_vs_oracle_values.append(stop_elapsed - float(oracle_stop_elapsed_ms[row_indices[0]]))
+            excess_vs_oracle_values.append(
+                stop_elapsed - float(oracle_stop_elapsed_ms[row_indices[0]])
+            )
 
     total_tests = len(grouped_rows)
     return {
@@ -839,7 +898,11 @@ def main() -> None:
         raise SystemExit("--max-eval-shards must be positive when set")
     if args.threshold_steps <= 0:
         raise SystemExit("--threshold-steps must be positive")
-    if args.threshold_min <= 0 or args.threshold_max >= 1 or args.threshold_min >= args.threshold_max:
+    if (
+        args.threshold_min <= 0
+        or args.threshold_max >= 1
+        or args.threshold_min >= args.threshold_max
+    ):
         raise SystemExit("--threshold-min/max must satisfy 0 < min < max < 1")
 
     seed_everything(args.seed)

@@ -46,64 +46,91 @@ if "TMPDIR" not in os.environ:
 import torch
 from torch import nn
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from foundation_model_twostage import (
-    FMNetTwoStage, FMNetTwoStageConfig, FMNetV3Config, Stage2PolicyConfig,
-    SPEED_TIER_TO_INDEX, log1p_mbps, expm1_mbps,
+from fmfstlt.models.two_stage import (
+    SPEED_TIER_TO_INDEX,
+    FMNetTwoStage,
+    FMNetTwoStageConfig,
+    FMNetV3Config,
+    Stage2PolicyConfig,
+    expm1_mbps,
+    log1p_mbps,
 )
 
 try:
     from tqdm.auto import tqdm
 except ImportError:
+
     class tqdm:  # type: ignore
         def __init__(self, iterable=None, **kwargs):
             self.iterable = iterable
+
         def __iter__(self):
             return iter(self.iterable) if self.iterable is not None else iter(())
-        def set_postfix(self, *a, **k): pass
-        def close(self): pass
+
+        def set_postfix(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
 
 
 # ============================================================================
 # CLI
 # ============================================================================
 
+
 def parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parent.parent
     artifacts = root / "artifacts_exact_public"
     p = argparse.ArgumentParser(description="Three-phase training for FMNetTwoStage")
-    p.add_argument("--input-root", type=Path,
-                   default=artifacts / "stage2_transformer_dataset_eps_10")
-    p.add_argument("--pretrained-encoder", type=Path, default=None,
-                   help="Optional FMNet v3 pretraining checkpoint (loads encoder weights).")
-    p.add_argument("--output-root", type=Path,
-                   default=artifacts / "foundation_twostage_eps_10")
+    p.add_argument(
+        "--input-root", type=Path, default=artifacts / "stage2_transformer_dataset_eps_10"
+    )
+    p.add_argument(
+        "--pretrained-encoder",
+        type=Path,
+        default=None,
+        help="Optional FMNet v3 pretraining checkpoint (loads encoder weights).",
+    )
+    p.add_argument("--output-root", type=Path, default=artifacts / "foundation_twostage_eps_10")
     p.add_argument("--train-subset", default="train")
     p.add_argument("--val-subset", default="val")
     p.add_argument("--eval-subsets", nargs="+", default=["val", "test", "robustness"])
 
     # Variant
-    p.add_argument("--include-h-decision", action="store_true",
-                   help="Richer variant: concat h_decision into Stage 2 input.")
+    p.add_argument(
+        "--include-h-decision",
+        action="store_true",
+        help="Richer variant: concat h_decision into Stage 2 input.",
+    )
 
     # Phase 1
     p.add_argument("--phase-1-epochs", type=int, default=8)
     p.add_argument("--phase-1-lr", type=float, default=5e-5)
     p.add_argument("--phase-1-prefix-weight", type=float, default=2.0)
     p.add_argument("--phase-1-final-weight", type=float, default=1.0)
-    p.add_argument("--skip-phase-1", action="store_true",
-                   help="Skip Phase 1 entirely (use phase-1 checkpoint via --resume-phase1).")
-    p.add_argument("--resume-phase1", type=Path, default=None,
-                   help="Path to a Phase 1 checkpoint to skip Phase 1 training.")
+    p.add_argument(
+        "--skip-phase-1",
+        action="store_true",
+        help="Skip Phase 1 entirely (use phase-1 checkpoint via --resume-phase1).",
+    )
+    p.add_argument(
+        "--resume-phase1",
+        type=Path,
+        default=None,
+        help="Path to a Phase 1 checkpoint to skip Phase 1 training.",
+    )
 
     # Phase 2
     p.add_argument("--phase-2-epochs", type=int, default=5)
     p.add_argument("--phase-2-lr", type=float, default=1e-3)
 
     # Phase 3
-    p.add_argument("--enable-phase-3", action="store_true",
-                   help="Enable optional Phase 3 end-to-end fine-tune (gated).")
+    p.add_argument(
+        "--enable-phase-3",
+        action="store_true",
+        help="Enable optional Phase 3 end-to-end fine-tune (gated).",
+    )
     p.add_argument("--phase-3-epochs", type=int, default=3)
     p.add_argument("--phase-3-lr", type=float, default=2e-5)
     p.add_argument("--phase-3-prefix-weight", type=float, default=1.0)
@@ -122,14 +149,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=1337)
 
     # Phase 1 stability options
-    p.add_argument("--phase-1-cosine-lr", action="store_true",
-                   help="Use cosine annealing for Phase 1 LR (after warmup).")
-    p.add_argument("--phase-1-cosine-min-lr-frac", type=float, default=0.01,
-                   help="Cosine decay floor as a fraction of base lr.")
-    p.add_argument("--phase-1-ema", action="store_true",
-                   help="Maintain exponential-moving-average weights during Phase 1; eval/save EMA.")
-    p.add_argument("--phase-1-ema-decay", type=float, default=0.999,
-                   help="EMA decay rate (closer to 1.0 = more averaging).")
+    p.add_argument(
+        "--phase-1-cosine-lr",
+        action="store_true",
+        help="Use cosine annealing for Phase 1 LR (after warmup).",
+    )
+    p.add_argument(
+        "--phase-1-cosine-min-lr-frac",
+        type=float,
+        default=0.01,
+        help="Cosine decay floor as a fraction of base lr.",
+    )
+    p.add_argument(
+        "--phase-1-ema",
+        action="store_true",
+        help="Maintain exponential-moving-average weights during Phase 1; eval/save EMA.",
+    )
+    p.add_argument(
+        "--phase-1-ema-decay",
+        type=float,
+        default=0.999,
+        help="EMA decay rate (closer to 1.0 = more averaging).",
+    )
 
     # Threshold sweep
     p.add_argument("--threshold-min", type=float, default=0.05)
@@ -164,6 +205,7 @@ def parse_args() -> argparse.Namespace:
 # Utilities
 # ============================================================================
 
+
 def resolve_device(name: str) -> torch.device:
     if name == "cuda":
         if not torch.cuda.is_available():
@@ -175,7 +217,9 @@ def resolve_device(name: str) -> torch.device:
 
 
 def seed_everything(seed: int) -> None:
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
@@ -216,9 +260,10 @@ def iter_batches(paths, batch_size, shuffle, rng):
         if shuffle:
             rng.shuffle(order)
         for start in range(0, N, batch_size):
-            idx = order[start: start + batch_size]
-            tier_idx = np.array([SPEED_TIER_TO_INDEX[str(t)] for t in speed_tier[idx]],
-                                dtype=np.int64)
+            idx = order[start : start + batch_size]
+            tier_idx = np.array(
+                [SPEED_TIER_TO_INDEX[str(t)] for t in speed_tier[idx]], dtype=np.int64
+            )
             yield {
                 "x_full": x_full[idx],
                 "decision_valid_mask": decision_valid_mask[idx],
@@ -239,6 +284,7 @@ def iter_batches(paths, batch_size, shuffle, rng):
 # ============================================================================
 # Metrics
 # ============================================================================
+
 
 def throughput_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     err = np.abs(y_pred - y_true)
@@ -265,7 +311,6 @@ def prefix_throughput_metrics(valid, pred, y_true_per_test, xgb_pred):
 
 def policy_metrics_at_threshold(eval_data: dict, threshold: float) -> dict:
     valid = eval_data["dec_valid"].astype(bool)
-    end_bucket = eval_data["dec_end_bucket"]
     elapsed = eval_data["dec_elapsed_ms"]
     stop_prob = eval_data["dec_stop_prob"]
     stop_label = eval_data["dec_stop_label"]
@@ -298,19 +343,28 @@ def policy_metrics_at_threshold(eval_data: dict, threshold: float) -> dict:
     sel_elapsed = elapsed[rows, chosen_idx_safe]
     sel_safe = inst_safe[rows, chosen_idx_safe]
     sel_rel = rel_err[rows, chosen_idx_safe]
-    last_idx_per_test = np.array([
-        (np.flatnonzero(valid[i])[-1] if valid[i].any() else 0) for i in range(N)
-    ])
+    last_idx_per_test = np.array(
+        [(np.flatnonzero(valid[i])[-1] if valid[i].any() else 0) for i in range(N)]
+    )
     full_elapsed = elapsed[rows, last_idx_per_test]
     fired_per_test = fired_mask.any(axis=1)
 
     n_used = int(valid_choose.sum())
     if n_used == 0:
-        return {"threshold": threshold, "f1": f1, "precision": precision, "recall": recall,
-                "tests": 0, "emitted_stop_rate": 0.0, "within_epsilon_rate": 0.0,
-                "mean_savings_ms": 0.0, "median_savings_ms": 0.0,
-                "mean_stop_elapsed_ms": 0.0, "median_stop_elapsed_ms": 0.0,
-                "mean_relative_error_at_stop": 0.0}
+        return {
+            "threshold": threshold,
+            "f1": f1,
+            "precision": precision,
+            "recall": recall,
+            "tests": 0,
+            "emitted_stop_rate": 0.0,
+            "within_epsilon_rate": 0.0,
+            "mean_savings_ms": 0.0,
+            "median_savings_ms": 0.0,
+            "mean_stop_elapsed_ms": 0.0,
+            "median_stop_elapsed_ms": 0.0,
+            "mean_relative_error_at_stop": 0.0,
+        }
     sel_elapsed = sel_elapsed[valid_choose]
     sel_safe = sel_safe[valid_choose]
     sel_rel = sel_rel[valid_choose]
@@ -347,16 +401,25 @@ def select_threshold(eval_data, thresholds, min_within_eps):
 # Forward + collect
 # ============================================================================
 
+
 def gather_eval_predictions(model, paths, device, batch_size, max_batches, mode: str) -> dict:
     """mode is 'stage1' (Phase 1) or 'full' (Phase 2/3)."""
     model.eval()
     fields = {
-        "uuid": [], "test_time": [], "speed_tier_idx": [], "y_true": [],
+        "uuid": [],
+        "test_time": [],
+        "speed_tier_idx": [],
+        "y_true": [],
         "final_mu_mbps": [],
-        "dec_valid": [], "dec_end_bucket": [], "dec_elapsed_ms": [],
-        "dec_stage1_mu_mbps": [], "dec_stage1_logvar": [],
-        "dec_stop_prob": [], "dec_stop_label": [],
-        "dec_instantaneous_safe": [], "dec_xgb_y_pred": [],
+        "dec_valid": [],
+        "dec_end_bucket": [],
+        "dec_elapsed_ms": [],
+        "dec_stage1_mu_mbps": [],
+        "dec_stage1_logvar": [],
+        "dec_stop_prob": [],
+        "dec_stop_label": [],
+        "dec_instantaneous_safe": [],
+        "dec_xgb_y_pred": [],
         "dec_relative_error": [],
     }
     rng = np.random.default_rng(0)
@@ -395,13 +458,16 @@ def gather_eval_predictions(model, paths, device, batch_size, max_batches, mode:
             bcount += 1
             if max_batches is not None and bcount >= max_batches:
                 break
-    return {k: np.concatenate(v, axis=0) if v and isinstance(v[0], np.ndarray)
-            else np.concatenate(v) for k, v in fields.items()}
+    return {
+        k: np.concatenate(v, axis=0) if v and isinstance(v[0], np.ndarray) else np.concatenate(v)
+        for k, v in fields.items()
+    }
 
 
 # ============================================================================
 # Phase loops
 # ============================================================================
+
 
 def lr_at_step(step, base_lr, warmup):
     if warmup <= 0 or step >= warmup:
@@ -409,10 +475,12 @@ def lr_at_step(step, base_lr, warmup):
     return base_lr * (step + 1) / warmup
 
 
-def lr_cosine(step: int, total_steps: int, base_lr: float, warmup: int,
-              min_lr_frac: float = 0.01) -> float:
+def lr_cosine(
+    step: int, total_steps: int, base_lr: float, warmup: int, min_lr_frac: float = 0.01
+) -> float:
     """Linear warmup then cosine decay from base_lr -> base_lr * min_lr_frac."""
     import math
+
     if step < warmup:
         return base_lr * (step + 1) / max(1, warmup)
     progress = (step - warmup) / max(1, total_steps - warmup)
@@ -463,7 +531,9 @@ def train_phase_1(args, model, device, train_paths, val_paths, output_root):
     model.unfreeze_encoder()
     optimizer = torch.optim.AdamW(
         list(model.encoder_model.parameters()),
-        lr=args.phase_1_lr, weight_decay=args.weight_decay, betas=(0.9, 0.95),
+        lr=args.phase_1_lr,
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.95),
     )
     rng = np.random.default_rng(args.seed)
     history = []
@@ -482,7 +552,9 @@ def train_phase_1(args, model, device, train_paths, val_paths, output_root):
 
     ema = EMA(model.encoder_model, decay=args.phase_1_ema_decay) if args.phase_1_ema else None
     if args.phase_1_cosine_lr:
-        print(f"[phase1] cosine LR: base={args.phase_1_lr} -> {args.phase_1_lr*args.phase_1_cosine_min_lr_frac:.2e} over {total_steps} steps")
+        print(
+            f"[phase1] cosine LR: base={args.phase_1_lr} -> {args.phase_1_lr * args.phase_1_cosine_min_lr_frac:.2e} over {total_steps} steps"
+        )
     if ema:
         print(f"[phase1] EMA averaging enabled, decay={args.phase_1_ema_decay}")
 
@@ -495,8 +567,12 @@ def train_phase_1(args, model, device, train_paths, val_paths, output_root):
         opt_steps = 0
         optimizer.zero_grad(set_to_none=True)
 
-        bar = tqdm(iter_batches(train_paths, args.batch_size, True, rng),
-                   desc=f"phase1 ep{epoch}", unit="batch", dynamic_ncols=True)
+        bar = tqdm(
+            iter_batches(train_paths, args.batch_size, True, rng),
+            desc=f"phase1 ep{epoch}",
+            unit="batch",
+            dynamic_ncols=True,
+        )
         for batch in bar:
             x = torch.from_numpy(batch["x_full"]).to(device, non_blocking=True)
             db = torch.from_numpy(batch["decision_end_bucket"]).to(device, non_blocking=True)
@@ -506,11 +582,11 @@ def train_phase_1(args, model, device, train_paths, val_paths, output_root):
 
             out = model.forward_stage1(x, db)
             target_dec = target_log.unsqueeze(1).expand_as(out["stage1_mu"])
-            prefix_mse = (((out["stage1_mu"] - target_dec) ** 2) * valid.float()).sum() \
-                / valid.float().sum().clamp_min(1.0)
+            prefix_mse = (
+                ((out["stage1_mu"] - target_dec) ** 2) * valid.float()
+            ).sum() / valid.float().sum().clamp_min(1.0)
             final_mse = ((out["final_throughput_mu"] - target_log) ** 2).mean()
-            loss = (args.phase_1_prefix_weight * prefix_mse
-                    + args.phase_1_final_weight * final_mse)
+            loss = args.phase_1_prefix_weight * prefix_mse + args.phase_1_final_weight * final_mse
             (loss / args.gradient_accumulation_steps).backward()
 
             sums["loss"] += float(loss.item())
@@ -522,9 +598,13 @@ def train_phase_1(args, model, device, train_paths, val_paths, output_root):
                 if args.clip_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
                 if args.phase_1_cosine_lr:
-                    new_lr = lr_cosine(global_step, total_steps,
-                                        args.phase_1_lr, args.warmup_steps,
-                                        args.phase_1_cosine_min_lr_frac)
+                    new_lr = lr_cosine(
+                        global_step,
+                        total_steps,
+                        args.phase_1_lr,
+                        args.warmup_steps,
+                        args.phase_1_cosine_min_lr_frac,
+                    )
                 else:
                     new_lr = lr_at_step(global_step, args.phase_1_lr, args.warmup_steps)
                 for g in optimizer.param_groups:
@@ -538,13 +618,15 @@ def train_phase_1(args, model, device, train_paths, val_paths, output_root):
                 global_step += 1
             if opt_steps % 25 == 0 and opt_steps > 0:
                 bar.set_postfix(
-                    loss=f"{sums['loss']/max(1,microbatch):.3f}",
-                    pmse=f"{sums['prefix_mse']/max(1,microbatch):.3f}",
-                    fmse=f"{sums['final_mse']/max(1,microbatch):.3f}",
+                    loss=f"{sums['loss'] / max(1, microbatch):.3f}",
+                    pmse=f"{sums['prefix_mse'] / max(1, microbatch):.3f}",
+                    fmse=f"{sums['final_mse'] / max(1, microbatch):.3f}",
                     step=opt_steps,
                 )
-            if (args.max_train_batches_per_epoch is not None
-                    and opt_steps >= args.max_train_batches_per_epoch):
+            if (
+                args.max_train_batches_per_epoch is not None
+                and opt_steps >= args.max_train_batches_per_epoch
+            ):
                 break
         bar.close()
         if accum > 0:
@@ -558,17 +640,22 @@ def train_phase_1(args, model, device, train_paths, val_paths, output_root):
         # ---- validation (use EMA weights if enabled) ----
         if ema is not None:
             ema.apply_to(model.encoder_model)
-        val_data = gather_eval_predictions(model, val_paths, device, args.batch_size,
-                                           args.max_eval_batches, mode="stage1")
+        val_data = gather_eval_predictions(
+            model, val_paths, device, args.batch_size, args.max_eval_batches, mode="stage1"
+        )
         val_final = throughput_metrics(val_data["y_true"], val_data["final_mu_mbps"])
         val_prefix = prefix_throughput_metrics(
-            val_data["dec_valid"], val_data["dec_stage1_mu_mbps"],
-            val_data["y_true"], val_data["dec_xgb_y_pred"]
+            val_data["dec_valid"],
+            val_data["dec_stage1_mu_mbps"],
+            val_data["y_true"],
+            val_data["dec_xgb_y_pred"],
         )
         train_avg = {k: v / max(1, microbatch) for k, v in sums.items()}
         train_time = time.time() - t0
         rec = {
-            "phase": 1, "epoch": epoch, "train": train_avg,
+            "phase": 1,
+            "epoch": epoch,
+            "train": train_avg,
             "val_final_throughput": val_final,
             "val_prefix_throughput": val_prefix,
             "train_time_s": train_time,
@@ -576,9 +663,11 @@ def train_phase_1(args, model, device, train_paths, val_paths, output_root):
         history.append(rec)
         f_mae = val_prefix["foundation"].get("mae", float("inf"))
         x_mae = val_prefix["xgboost"].get("mae", float("nan"))
-        print(f"[phase1] ep{epoch} val: finalMAE {val_final['mae']:.2f} | "
-              f"prefMAE F={f_mae:.2f} X={x_mae:.2f} | "
-              f"finalRMSE {val_final['rmse']:.2f} | time {train_time:.0f}s")
+        print(
+            f"[phase1] ep{epoch} val: finalMAE {val_final['mae']:.2f} | "
+            f"prefMAE F={f_mae:.2f} X={x_mae:.2f} | "
+            f"finalRMSE {val_final['rmse']:.2f} | time {train_time:.0f}s"
+        )
 
         if f_mae < best_val_mae:
             best_val_mae = f_mae
@@ -593,27 +682,36 @@ def train_phase_1(args, model, device, train_paths, val_paths, output_root):
     if best_state is not None:
         model.load_state_dict(best_state)
     ckpt_path = output_root / "phase1_checkpoint.pt"
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "config": model.config.to_dict(),
-        "best_epoch": best_epoch,
-        "best_val_prefix_mae": best_val_mae,
-        "tag": "fmnet_twostage_phase1",
-        "phase1_used_cosine_lr": bool(args.phase_1_cosine_lr),
-        "phase1_used_ema": bool(args.phase_1_ema),
-    }, ckpt_path)
-    print(f"[phase1] saved best to {ckpt_path} (epoch={best_epoch}, val_prefMAE={best_val_mae:.2f})")
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": model.config.to_dict(),
+            "best_epoch": best_epoch,
+            "best_val_prefix_mae": best_val_mae,
+            "tag": "fmnet_twostage_phase1",
+            "phase1_used_cosine_lr": bool(args.phase_1_cosine_lr),
+            "phase1_used_ema": bool(args.phase_1_ema),
+        },
+        ckpt_path,
+    )
+    print(
+        f"[phase1] saved best to {ckpt_path} (epoch={best_epoch}, val_prefMAE={best_val_mae:.2f})"
+    )
     return history, best_epoch
 
 
 def train_phase_2(args, model, device, train_paths, val_paths, output_root, thresholds):
-    print("\n========== PHASE 2: Stage 2 policy module (encoder frozen, Stage 1 detached) ==========")
+    print(
+        "\n========== PHASE 2: Stage 2 policy module (encoder frozen, Stage 1 detached) =========="
+    )
     model.freeze_encoder()
     # Only Stage 2 policy module is trainable
     policy_params = list(model.policy.parameters())
     optimizer = torch.optim.AdamW(
         policy_params,
-        lr=args.phase_2_lr, weight_decay=args.weight_decay, betas=(0.9, 0.95),
+        lr=args.phase_2_lr,
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.95),
     )
     rng = np.random.default_rng(args.seed + 1)
     history = []
@@ -634,8 +732,12 @@ def train_phase_2(args, model, device, train_paths, val_paths, output_root, thre
         opt_steps = 0
         optimizer.zero_grad(set_to_none=True)
 
-        bar = tqdm(iter_batches(train_paths, args.batch_size, True, rng),
-                   desc=f"phase2 ep{epoch}", unit="batch", dynamic_ncols=True)
+        bar = tqdm(
+            iter_batches(train_paths, args.batch_size, True, rng),
+            desc=f"phase2 ep{epoch}",
+            unit="batch",
+            dynamic_ncols=True,
+        )
         for batch in bar:
             x = torch.from_numpy(batch["x_full"]).to(device, non_blocking=True)
             db = torch.from_numpy(batch["decision_end_bucket"]).to(device, non_blocking=True)
@@ -646,7 +748,9 @@ def train_phase_2(args, model, device, train_paths, val_paths, output_root, thre
 
             out = model.forward_full(x, db, de_ms, obs, detach_stage1=True)
             bce = nn.functional.binary_cross_entropy_with_logits(
-                out["stop_logit"], stop_target, reduction="none",
+                out["stop_logit"],
+                stop_target,
+                reduction="none",
             )
             stop_loss = (bce * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
             loss = stop_loss
@@ -667,9 +771,11 @@ def train_phase_2(args, model, device, train_paths, val_paths, output_root, thre
                 accum = 0
                 global_step += 1
             if opt_steps % 25 == 0 and opt_steps > 0:
-                bar.set_postfix(loss=f"{sums['loss']/max(1,microbatch):.3f}", step=opt_steps)
-            if (args.max_train_batches_per_epoch is not None
-                    and opt_steps >= args.max_train_batches_per_epoch):
+                bar.set_postfix(loss=f"{sums['loss'] / max(1, microbatch):.3f}", step=opt_steps)
+            if (
+                args.max_train_batches_per_epoch is not None
+                and opt_steps >= args.max_train_batches_per_epoch
+            ):
                 break
         bar.close()
         if accum > 0:
@@ -679,28 +785,35 @@ def train_phase_2(args, model, device, train_paths, val_paths, output_root, thre
             optimizer.zero_grad(set_to_none=True)
 
         # ---- validation ----
-        val_data = gather_eval_predictions(model, val_paths, device, args.batch_size,
-                                           args.max_eval_batches, mode="full")
+        val_data = gather_eval_predictions(
+            model, val_paths, device, args.batch_size, args.max_eval_batches, mode="full"
+        )
         threshold, sweep = select_threshold(val_data, thresholds, args.min_within_epsilon_rate)
         at_best = policy_metrics_at_threshold(val_data, threshold)
-        score = (at_best["mean_savings_ms"]
-                 if at_best["within_epsilon_rate"] >= args.min_within_epsilon_rate
-                 else at_best["within_epsilon_rate"] - 10.0)
+        score = (
+            at_best["mean_savings_ms"]
+            if at_best["within_epsilon_rate"] >= args.min_within_epsilon_rate
+            else at_best["within_epsilon_rate"] - 10.0
+        )
         train_time = time.time() - t0
         train_avg = {k: v / max(1, microbatch) for k, v in sums.items()}
         rec = {
-            "phase": 2, "epoch": epoch, "train": train_avg,
+            "phase": 2,
+            "epoch": epoch,
+            "train": train_avg,
             "val_threshold": threshold,
             "val_policy_at_threshold": at_best,
             "selection_score": score,
             "train_time_s": train_time,
         }
         history.append(rec)
-        print(f"[phase2] ep{epoch} val: thr {threshold:.2f} | F1 {at_best['f1']:.4f} | "
-              f"within_eps {at_best['within_epsilon_rate']:.4f} | "
-              f"savings {at_best['mean_savings_ms']:.1f}ms | "
-              f"emit {at_best['emitted_stop_rate']:.3f} | "
-              f"time {train_time:.0f}s")
+        print(
+            f"[phase2] ep{epoch} val: thr {threshold:.2f} | F1 {at_best['f1']:.4f} | "
+            f"within_eps {at_best['within_epsilon_rate']:.4f} | "
+            f"savings {at_best['mean_savings_ms']:.1f}ms | "
+            f"emit {at_best['emitted_stop_rate']:.3f} | "
+            f"time {train_time:.0f}s"
+        )
 
         if score > best_score:
             best_score = score
@@ -711,15 +824,20 @@ def train_phase_2(args, model, device, train_paths, val_paths, output_root, thre
     if best_state is not None:
         model.load_state_dict(best_state)
     ckpt_path = output_root / "phase2_checkpoint.pt"
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "config": model.config.to_dict(),
-        "best_epoch": best_epoch,
-        "best_threshold": best_threshold,
-        "best_score": best_score,
-        "tag": "fmnet_twostage_phase2",
-    }, ckpt_path)
-    print(f"[phase2] saved best to {ckpt_path} (ep={best_epoch}, thr={best_threshold}, score={best_score:.2f})")
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": model.config.to_dict(),
+            "best_epoch": best_epoch,
+            "best_threshold": best_threshold,
+            "best_score": best_score,
+            "tag": "fmnet_twostage_phase2",
+        },
+        ckpt_path,
+    )
+    print(
+        f"[phase2] saved best to {ckpt_path} (ep={best_epoch}, thr={best_threshold}, score={best_score:.2f})"
+    )
     return history, best_epoch, best_threshold, best_score
 
 
@@ -728,7 +846,9 @@ def train_phase_3(args, model, device, train_paths, val_paths, output_root, thre
     model.unfreeze_encoder()
     optimizer = torch.optim.AdamW(
         list(model.parameters()),
-        lr=args.phase_3_lr, weight_decay=args.weight_decay, betas=(0.9, 0.95),
+        lr=args.phase_3_lr,
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.95),
     )
     rng = np.random.default_rng(args.seed + 2)
     history = []
@@ -747,8 +867,12 @@ def train_phase_3(args, model, device, train_paths, val_paths, output_root, thre
         opt_steps = 0
         optimizer.zero_grad(set_to_none=True)
 
-        bar = tqdm(iter_batches(train_paths, args.batch_size, True, rng),
-                   desc=f"phase3 ep{epoch}", unit="batch", dynamic_ncols=True)
+        bar = tqdm(
+            iter_batches(train_paths, args.batch_size, True, rng),
+            desc=f"phase3 ep{epoch}",
+            unit="batch",
+            dynamic_ncols=True,
+        )
         for batch in bar:
             x = torch.from_numpy(batch["x_full"]).to(device, non_blocking=True)
             db = torch.from_numpy(batch["decision_end_bucket"]).to(device, non_blocking=True)
@@ -761,16 +885,21 @@ def train_phase_3(args, model, device, train_paths, val_paths, output_root, thre
 
             out = model.forward_full(x, db, de_ms, obs, detach_stage1=False)
             target_dec = target_log.unsqueeze(1).expand_as(out["stage1_mu"])
-            prefix_mse = (((out["stage1_mu"] - target_dec) ** 2) * valid.float()).sum() \
-                / valid.float().sum().clamp_min(1.0)
+            prefix_mse = (
+                ((out["stage1_mu"] - target_dec) ** 2) * valid.float()
+            ).sum() / valid.float().sum().clamp_min(1.0)
             final_mse = ((out["final_throughput_mu"] - target_log) ** 2).mean()
             bce = nn.functional.binary_cross_entropy_with_logits(
-                out["stop_logit"], stop_target, reduction="none",
+                out["stop_logit"],
+                stop_target,
+                reduction="none",
             )
             stop_loss = (bce * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
-            loss = (args.phase_3_prefix_weight * prefix_mse
-                    + args.phase_3_final_weight * final_mse
-                    + args.phase_3_stop_weight * stop_loss)
+            loss = (
+                args.phase_3_prefix_weight * prefix_mse
+                + args.phase_3_final_weight * final_mse
+                + args.phase_3_stop_weight * stop_loss
+            )
             (loss / args.gradient_accumulation_steps).backward()
 
             sums["loss"] += float(loss.item())
@@ -789,8 +918,10 @@ def train_phase_3(args, model, device, train_paths, val_paths, output_root, thre
                 opt_steps += 1
                 accum = 0
                 global_step += 1
-            if (args.max_train_batches_per_epoch is not None
-                    and opt_steps >= args.max_train_batches_per_epoch):
+            if (
+                args.max_train_batches_per_epoch is not None
+                and opt_steps >= args.max_train_batches_per_epoch
+            ):
                 break
         bar.close()
         if accum > 0:
@@ -799,22 +930,29 @@ def train_phase_3(args, model, device, train_paths, val_paths, output_root, thre
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
-        val_data = gather_eval_predictions(model, val_paths, device, args.batch_size,
-                                           args.max_eval_batches, mode="full")
+        val_data = gather_eval_predictions(
+            model, val_paths, device, args.batch_size, args.max_eval_batches, mode="full"
+        )
         threshold, sweep = select_threshold(val_data, thresholds, args.min_within_epsilon_rate)
         at_best = policy_metrics_at_threshold(val_data, threshold)
         val_final = throughput_metrics(val_data["y_true"], val_data["final_mu_mbps"])
         val_prefix = prefix_throughput_metrics(
-            val_data["dec_valid"], val_data["dec_stage1_mu_mbps"],
-            val_data["y_true"], val_data["dec_xgb_y_pred"]
+            val_data["dec_valid"],
+            val_data["dec_stage1_mu_mbps"],
+            val_data["y_true"],
+            val_data["dec_xgb_y_pred"],
         )
-        score = (at_best["mean_savings_ms"]
-                 if at_best["within_epsilon_rate"] >= args.min_within_epsilon_rate
-                 else at_best["within_epsilon_rate"] - 10.0)
+        score = (
+            at_best["mean_savings_ms"]
+            if at_best["within_epsilon_rate"] >= args.min_within_epsilon_rate
+            else at_best["within_epsilon_rate"] - 10.0
+        )
         train_avg = {k: v / max(1, microbatch) for k, v in sums.items()}
         train_time = time.time() - t0
         rec = {
-            "phase": 3, "epoch": epoch, "train": train_avg,
+            "phase": 3,
+            "epoch": epoch,
+            "train": train_avg,
             "val_threshold": threshold,
             "val_policy_at_threshold": at_best,
             "val_final_throughput": val_final,
@@ -823,11 +961,13 @@ def train_phase_3(args, model, device, train_paths, val_paths, output_root, thre
             "train_time_s": train_time,
         }
         history.append(rec)
-        print(f"[phase3] ep{epoch} val: thr {threshold:.2f} | F1 {at_best['f1']:.4f} | "
-              f"within_eps {at_best['within_epsilon_rate']:.4f} | "
-              f"savings {at_best['mean_savings_ms']:.1f}ms | "
-              f"finalMAE {val_final['mae']:.2f} | "
-              f"prefMAE F={val_prefix['foundation'].get('mae','?')} X={val_prefix['xgboost'].get('mae','?')}")
+        print(
+            f"[phase3] ep{epoch} val: thr {threshold:.2f} | F1 {at_best['f1']:.4f} | "
+            f"within_eps {at_best['within_epsilon_rate']:.4f} | "
+            f"savings {at_best['mean_savings_ms']:.1f}ms | "
+            f"finalMAE {val_final['mae']:.2f} | "
+            f"prefMAE F={val_prefix['foundation'].get('mae', '?')} X={val_prefix['xgboost'].get('mae', '?')}"
+        )
 
         if score > best_score:
             best_score = score
@@ -838,13 +978,16 @@ def train_phase_3(args, model, device, train_paths, val_paths, output_root, thre
     if best_state is not None:
         model.load_state_dict(best_state)
     ckpt_path = output_root / "phase3_checkpoint.pt"
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "config": model.config.to_dict(),
-        "best_epoch": best_epoch,
-        "best_threshold": best_threshold,
-        "tag": "fmnet_twostage_phase3",
-    }, ckpt_path)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": model.config.to_dict(),
+            "best_epoch": best_epoch,
+            "best_threshold": best_threshold,
+            "tag": "fmnet_twostage_phase3",
+        },
+        ckpt_path,
+    )
     print(f"[phase3] saved best to {ckpt_path}")
     return history, best_epoch, best_threshold, best_score
 
@@ -853,17 +996,18 @@ def train_phase_3(args, model, device, train_paths, val_paths, output_root, thre
 # Final eval
 # ============================================================================
 
+
 def final_evaluation(model, args, device, eval_paths_by_subset, threshold, thresholds):
     final = {}
     for subset, paths in eval_paths_by_subset.items():
-        data = gather_eval_predictions(model, paths, device, args.batch_size,
-                                       args.max_eval_batches, mode="full")
+        data = gather_eval_predictions(
+            model, paths, device, args.batch_size, args.max_eval_batches, mode="full"
+        )
         sweep = [policy_metrics_at_threshold(data, float(t)) for t in thresholds]
         at_best = policy_metrics_at_threshold(data, threshold)
         f_throughput = throughput_metrics(data["y_true"], data["final_mu_mbps"])
         prefix = prefix_throughput_metrics(
-            data["dec_valid"], data["dec_stage1_mu_mbps"],
-            data["y_true"], data["dec_xgb_y_pred"]
+            data["dec_valid"], data["dec_stage1_mu_mbps"], data["y_true"], data["dec_xgb_y_pred"]
         )
         final[subset] = {
             "policy_at_best_threshold": at_best,
@@ -871,10 +1015,12 @@ def final_evaluation(model, args, device, eval_paths_by_subset, threshold, thres
             "final_throughput": f_throughput,
             "prefix_throughput": prefix,
         }
-        print(f"[final] {subset}: thr {threshold:.2f} | F1 {at_best['f1']:.4f} | "
-              f"within_eps {at_best['within_epsilon_rate']:.4f} | "
-              f"savings {at_best['mean_savings_ms']:.1f}ms | "
-              f"finalMAE {f_throughput['mae']:.2f}/{f_throughput['rmse']:.2f}")
+        print(
+            f"[final] {subset}: thr {threshold:.2f} | F1 {at_best['f1']:.4f} | "
+            f"within_eps {at_best['within_epsilon_rate']:.4f} | "
+            f"savings {at_best['mean_savings_ms']:.1f}ms | "
+            f"finalMAE {f_throughput['mae']:.2f}/{f_throughput['rmse']:.2f}"
+        )
     return final
 
 
@@ -882,43 +1028,58 @@ def final_evaluation(model, args, device, eval_paths_by_subset, threshold, thres
 # Main
 # ============================================================================
 
+
 def main() -> None:
     args = parse_args()
     seed_everything(args.seed)
     device = resolve_device(args.device)
     args.output_root.mkdir(parents=True, exist_ok=True)
 
-    train_paths = maybe_limit(list_subset_paths(args.input_root, args.train_subset),
-                              args.max_train_shards)
-    val_paths = maybe_limit(list_subset_paths(args.input_root, args.val_subset),
-                            args.max_eval_shards)
-    eval_paths = {s: maybe_limit(list_subset_paths(args.input_root, s), args.max_eval_shards)
-                  for s in args.eval_subsets}
+    train_paths = maybe_limit(
+        list_subset_paths(args.input_root, args.train_subset), args.max_train_shards
+    )
+    val_paths = maybe_limit(
+        list_subset_paths(args.input_root, args.val_subset), args.max_eval_shards
+    )
+    eval_paths = {
+        s: maybe_limit(list_subset_paths(args.input_root, s), args.max_eval_shards)
+        for s in args.eval_subsets
+    }
     thresholds = list(np.linspace(args.threshold_min, args.threshold_max, args.threshold_steps))
 
     encoder_cfg = FMNetV3Config(
-        d_model=args.encoder_d_model, num_heads=args.encoder_num_heads,
-        num_layers=args.encoder_num_layers, ff_dim=args.encoder_ff_dim,
+        d_model=args.encoder_d_model,
+        num_heads=args.encoder_num_heads,
+        num_layers=args.encoder_num_layers,
+        ff_dim=args.encoder_ff_dim,
         dropout=args.encoder_dropout,
     )
     policy_cfg = Stage2PolicyConfig(
-        d_model=args.policy_d_model, num_heads=args.policy_num_heads,
-        num_layers=args.policy_num_layers, ff_dim=args.policy_ff_dim,
+        d_model=args.policy_d_model,
+        num_heads=args.policy_num_heads,
+        num_layers=args.policy_num_layers,
+        ff_dim=args.policy_ff_dim,
         dropout=args.policy_dropout,
     )
     cfg = FMNetTwoStageConfig(
-        encoder=encoder_cfg, policy=policy_cfg, include_h_decision=args.include_h_decision,
+        encoder=encoder_cfg,
+        policy=policy_cfg,
+        include_h_decision=args.include_h_decision,
     )
     model = FMNetTwoStage(cfg).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"[init] FMNetTwoStage with {n_params/1e6:.2f}M params on {device} | "
-          f"include_h_decision={args.include_h_decision}")
+    print(
+        f"[init] FMNetTwoStage with {n_params / 1e6:.2f}M params on {device} | "
+        f"include_h_decision={args.include_h_decision}"
+    )
 
     if args.pretrained_encoder is not None and args.pretrained_encoder.exists():
         ckpt = torch.load(args.pretrained_encoder, map_location="cpu", weights_only=False)
         miss, unexp = model.load_encoder_state(ckpt["model_state_dict"])
-        print(f"[init] loaded pretrain encoder ckpt {args.pretrained_encoder}: "
-              f"missing={len(miss)} unexpected={len(unexp)}")
+        print(
+            f"[init] loaded pretrain encoder ckpt {args.pretrained_encoder}: "
+            f"missing={len(miss)} unexpected={len(unexp)}"
+        )
 
     # ---------- Phase 1 ----------
     phase1_hist = []
@@ -932,18 +1093,29 @@ def main() -> None:
         skipped_shape = [k for k, v in state.items() if k in own and own[k].shape != v.shape]
         skipped_missing = [k for k in state if k not in own]
         model.load_state_dict(loadable, strict=False)
-        print(f"[init] loaded phase1 ckpt {args.resume_phase1}: "
-              f"loaded={len(loadable)} skipped_shape={len(skipped_shape)} "
-              f"skipped_missing={len(skipped_missing)}")
+        print(
+            f"[init] loaded phase1 ckpt {args.resume_phase1}: "
+            f"loaded={len(loadable)} skipped_shape={len(skipped_shape)} "
+            f"skipped_missing={len(skipped_missing)}"
+        )
         if skipped_shape:
-            print(f"  (shape-mismatch keys not loaded, will train from init: {skipped_shape[:4]}...)")
+            print(
+                f"  (shape-mismatch keys not loaded, will train from init: {skipped_shape[:4]}...)"
+            )
     else:
-        phase1_hist, _ = train_phase_1(args, model, device, train_paths, val_paths,
-                                       args.output_root)
+        phase1_hist, _ = train_phase_1(
+            args, model, device, train_paths, val_paths, args.output_root
+        )
 
     # ---------- Phase 2 ----------
     phase2_hist, phase2_best_epoch, phase2_thr, phase2_score = train_phase_2(
-        args, model, device, train_paths, val_paths, args.output_root, thresholds,
+        args,
+        model,
+        device,
+        train_paths,
+        val_paths,
+        args.output_root,
+        thresholds,
     )
     # final eval after phase 2
     print("\n========== Final eval after Phase 2 ==========")
@@ -971,14 +1143,21 @@ def main() -> None:
     val_at_p2 = phase2_final.get("val", {}).get("policy_at_best_threshold", {})
     p3_we = val_at_p2.get("within_epsilon_rate", 0.0)
     p3_sav = val_at_p2.get("mean_savings_ms", 0.0)
-    p3_gate_passed = (p3_we >= args.phase3_gate_within_eps
-                      and p3_sav >= args.phase3_gate_savings_ms)
-    print(f"\nPhase 3 gate: val within_eps={p3_we:.4f} (need >= {args.phase3_gate_within_eps}), "
-          f"savings={p3_sav:.1f} ms (need >= {args.phase3_gate_savings_ms})")
+    p3_gate_passed = p3_we >= args.phase3_gate_within_eps and p3_sav >= args.phase3_gate_savings_ms
+    print(
+        f"\nPhase 3 gate: val within_eps={p3_we:.4f} (need >= {args.phase3_gate_within_eps}), "
+        f"savings={p3_sav:.1f} ms (need >= {args.phase3_gate_savings_ms})"
+    )
 
     if args.enable_phase_3 and p3_gate_passed:
         phase3_hist, _, phase3_thr, _ = train_phase_3(
-            args, model, device, train_paths, val_paths, args.output_root, thresholds,
+            args,
+            model,
+            device,
+            train_paths,
+            val_paths,
+            args.output_root,
+            thresholds,
         )
         print("\n========== Final eval after Phase 3 ==========")
         phase3_final = final_evaluation(model, args, device, eval_paths, phase3_thr, thresholds)
@@ -1002,10 +1181,8 @@ def main() -> None:
         "final_metrics_after_phase3": phase3_final,
         "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
     }
-    (args.output_root / "training_summary.json").write_text(
-        json.dumps(summary, indent=2) + "\n"
-    )
-    print(f"\n[done] wrote {args.output_root/'training_summary.json'}")
+    (args.output_root / "training_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(f"\n[done] wrote {args.output_root / 'training_summary.json'}")
 
 
 if __name__ == "__main__":

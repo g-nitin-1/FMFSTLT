@@ -14,6 +14,7 @@ import xgboost as xgb
 try:
     from tqdm.auto import tqdm
 except ImportError:
+
     class tqdm:  # type: ignore[override]
         def __init__(self, iterable=None, total=None, **kwargs) -> None:
             self.iterable = iterable

@@ -65,9 +65,7 @@ def main() -> None:
                 x = data["x"].astype(np.float32, copy=False)
                 feature_names = data["feature_names"]
                 if not np.array_equal(feature_names, stats_feature_names):
-                    raise ValueError(
-                        f"feature mismatch between {shard_path} and {args.stats_path}"
-                    )
+                    raise ValueError(f"feature mismatch between {shard_path} and {args.stats_path}")
 
                 x_norm = (x - mean.reshape(1, 1, -1)) / std.reshape(1, 1, -1)
                 out_path = out_dir / shard_path.name

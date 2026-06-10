@@ -6,9 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import xgboost as xgb
@@ -16,6 +16,7 @@ import xgboost as xgb
 try:
     from tqdm.auto import tqdm
 except ImportError:
+
     class tqdm:  # type: ignore[override]
         def __init__(self, iterable=None, **kwargs) -> None:
             self.iterable = iterable
@@ -149,7 +150,7 @@ def parse_args() -> argparse.Namespace:
 
 def load_split_map(split_path: Path) -> dict[str, str]:
     with np.load(split_path, allow_pickle=False) as data:
-        return dict(zip(data["uuid"].tolist(), data["subset"].tolist()))
+        return dict(zip(data["uuid"].tolist(), data["subset"].tolist(), strict=True))
 
 
 def iter_source_paths(
@@ -179,9 +180,9 @@ def compute_errors(
     relative_denominator_floor: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     abs_error = np.abs(y_pred - y_true).astype(np.float32, copy=False)
-    relative_error = (
-        abs_error / np.maximum(np.abs(y_true), relative_denominator_floor)
-    ).astype(np.float32, copy=False)
+    relative_error = (abs_error / np.maximum(np.abs(y_true), relative_denominator_floor)).astype(
+        np.float32, copy=False
+    )
     return abs_error, relative_error
 
 
@@ -200,7 +201,9 @@ def safe_mask_for_error_kind(
     return relative_error <= epsilon
 
 
-def make_stage1_window(x_dense: np.ndarray, end_bucket: int, window_size_buckets: int) -> np.ndarray:
+def make_stage1_window(
+    x_dense: np.ndarray, end_bucket: int, window_size_buckets: int
+) -> np.ndarray:
     start = max(0, end_bucket - window_size_buckets + 1)
     window = x_dense[start : end_bucket + 1]
     if window.shape[0] < window_size_buckets:
@@ -317,12 +320,18 @@ def flush_buffer(
         out_path,
         x_full=np.stack(buffer.x_full, axis=0).astype(np.float32, copy=False),
         bucket_mask=np.stack(buffer.bucket_mask, axis=0).astype(np.uint8, copy=False),
-        decision_valid_mask=np.stack(buffer.decision_valid_mask, axis=0).astype(np.uint8, copy=False),
-        decision_end_bucket=np.stack(buffer.decision_end_bucket, axis=0).astype(np.int16, copy=False),
-        decision_elapsed_ms=np.stack(buffer.decision_elapsed_ms, axis=0).astype(np.int32, copy=False),
-        decision_observed_buckets_seen=np.stack(buffer.decision_observed_buckets_seen, axis=0).astype(
+        decision_valid_mask=np.stack(buffer.decision_valid_mask, axis=0).astype(
+            np.uint8, copy=False
+        ),
+        decision_end_bucket=np.stack(buffer.decision_end_bucket, axis=0).astype(
             np.int16, copy=False
         ),
+        decision_elapsed_ms=np.stack(buffer.decision_elapsed_ms, axis=0).astype(
+            np.int32, copy=False
+        ),
+        decision_observed_buckets_seen=np.stack(
+            buffer.decision_observed_buckets_seen, axis=0
+        ).astype(np.int16, copy=False),
         y_pred_mbps=np.stack(buffer.y_pred_mbps, axis=0).astype(np.float32, copy=False),
         abs_error_mbps=np.stack(buffer.abs_error_mbps, axis=0).astype(np.float32, copy=False),
         relative_error=np.stack(buffer.relative_error, axis=0).astype(np.float32, copy=False),
@@ -460,7 +469,6 @@ def main() -> None:
             feature_names = data["feature_names"]
 
             current_max_sequence_buckets = int(x_full.shape[1])
-            feature_dim = int(x_full.shape[2])
             current_max_decisions_per_test = int(
                 max(
                     0,
@@ -524,7 +532,9 @@ def main() -> None:
                 if iteration_range is None:
                     y_pred = booster.inplace_predict(stage1_windows)
                 else:
-                    y_pred = booster.inplace_predict(stage1_windows, iteration_range=iteration_range)
+                    y_pred = booster.inplace_predict(
+                        stage1_windows, iteration_range=iteration_range
+                    )
                 y_pred = np.asarray(y_pred, dtype=np.float32)
 
                 y_true_decisions = np.full(decision_buckets.shape, y_true[idx], dtype=np.float32)
@@ -545,12 +555,16 @@ def main() -> None:
                 oracle_position = None
                 if oracle_stop_found:
                     unsafe_positions = np.flatnonzero(~instantaneous_safe)
-                    oracle_position = 0 if unsafe_positions.size == 0 else int(unsafe_positions[-1] + 1)
+                    oracle_position = (
+                        0 if unsafe_positions.size == 0 else int(unsafe_positions[-1] + 1)
+                    )
 
                 decision_valid_mask = np.zeros((max_decisions_per_test,), dtype=np.uint8)
                 decision_end_bucket_arr = np.full((max_decisions_per_test,), -1, dtype=np.int16)
                 decision_elapsed_ms_arr = np.full((max_decisions_per_test,), -1, dtype=np.int32)
-                decision_observed_buckets_seen_arr = np.full((max_decisions_per_test,), -1, dtype=np.int16)
+                decision_observed_buckets_seen_arr = np.full(
+                    (max_decisions_per_test,), -1, dtype=np.int16
+                )
                 y_pred_arr = np.zeros((max_decisions_per_test,), dtype=np.float32)
                 abs_error_arr = np.zeros((max_decisions_per_test,), dtype=np.float32)
                 relative_error_arr = np.zeros((max_decisions_per_test,), dtype=np.float32)
@@ -562,9 +576,14 @@ def main() -> None:
                 valid_count = int(decision_buckets.shape[0])
                 decision_valid_mask[:valid_count] = 1
                 decision_end_bucket_arr[:valid_count] = decision_buckets
-                decision_elapsed_ms_arr[:valid_count] = (decision_buckets.astype(np.int32) + 1) * 100
+                decision_elapsed_ms_arr[:valid_count] = (
+                    decision_buckets.astype(np.int32) + 1
+                ) * 100
                 decision_observed_buckets_seen_arr[:valid_count] = np.array(
-                    [int(bucket_mask[idx, : end_bucket + 1].sum()) for end_bucket in decision_buckets.tolist()],
+                    [
+                        int(bucket_mask[idx, : end_bucket + 1].sum())
+                        for end_bucket in decision_buckets.tolist()
+                    ],
                     dtype=np.int16,
                 )
                 y_pred_arr[:valid_count] = y_pred
@@ -653,8 +672,14 @@ def main() -> None:
     shard_bar.close()
 
     for (subset, source_split, source_shard_name), buffer in sorted(buffers.items()):
-        if recorded_feature_names is None or max_sequence_buckets is None or max_decisions_per_test is None:
-            raise RuntimeError("dataset builder reached flush stage without recorded feature metadata")
+        if (
+            recorded_feature_names is None
+            or max_sequence_buckets is None
+            or max_decisions_per_test is None
+        ):
+            raise RuntimeError(
+                "dataset builder reached flush stage without recorded feature metadata"
+            )
         manifest_entry = flush_buffer(
             buffer,
             output_root=output_root,
@@ -673,12 +698,13 @@ def main() -> None:
         )
         if manifest_entry is not None:
             manifest_entries.append(manifest_entry)
-            print(
-                f"built {manifest_entry['output_npz']} "
-                f"({manifest_entry['tests']} tests)"
-            )
+            print(f"built {manifest_entry['output_npz']} ({manifest_entry['tests']} tests)")
 
-    if recorded_feature_names is None or max_sequence_buckets is None or max_decisions_per_test is None:
+    if (
+        recorded_feature_names is None
+        or max_sequence_buckets is None
+        or max_decisions_per_test is None
+    ):
         raise RuntimeError("no examples were materialized")
 
     for subset in ("train", "val", "test", "robustness"):
