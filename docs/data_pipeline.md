@@ -54,9 +54,16 @@ Missing buckets are forward-filled while an independent bucket mask records whic
 observations were originally present. Normalization statistics are computed from the
 training split only.
 
-## Build Order
+## BigQuery Build and Download
 
-Run BigQuery SQL in this order:
+Prerequisites:
+
+- an authenticated Google Cloud CLI with the `bq` command;
+- a Google Cloud project with BigQuery Job User permission;
+- permission to create tables in the destination dataset;
+- awareness that the source scans are large and may incur BigQuery charges.
+
+The five SQL files under `sql/` are all required and run in this order:
 
 ```text
 sql/01_exact_ndt7_base_meta.sql
@@ -66,7 +73,37 @@ sql/03b_exact_test_features.sql
 sql/03c_exact_robustness_features.sql
 ```
 
-After exporting the generated tables:
+Run them through the portable wrapper. It creates the destination dataset if needed and
+replaces the repository's reference project identifier with your project and dataset:
+
+```bash
+export PROJECT_ID="your-google-cloud-project"
+export DATASET="fmfstlt"
+DRY_RUN=1 bash scripts/build_exact_public_bigquery.sh
+bash scripts/build_exact_public_bigquery.sh
+```
+
+The dry run validates the queries and reports estimated bytes before execution. Set
+`MAXIMUM_BYTES_BILLED` when running the build to make BigQuery reject any query above a
+chosen scan limit. On June 10, 2026, the dry-run estimates were approximately 619 GB for
+metadata, 483 GB each for train and test features, and 120 GB for robustness features.
+
+The SQL creates BigQuery tables; it does not download local files. Download the generated
+feature tables as restartable per-date, per-speed-tier CSV slices, then verify every local
+file against its BigQuery row count:
+
+```bash
+export PROJECT_ID="your-google-cloud-project"
+export DATASET="fmfstlt"
+bash scripts/export_exact_public_features.sh
+bash scripts/verify_exact_public_features.sh
+```
+
+For large exports, prefer `scripts/export_exact_public_tables_to_gcs.sh`. It extracts each
+feature table once to a user-owned Google Cloud Storage bucket instead of issuing many
+filtered local-download queries.
+
+After the CSV export:
 
 ```bash
 python -m scripts.build_exact_public_shards
@@ -88,6 +125,10 @@ python -m scripts.train_stage2_transformer
 
 Generated CSV, NPZ, model, and log files are excluded from Git because the complete
 local workspace exceeds 100 GB.
+
+The queries were validated against the public M-Lab schema on June 10, 2026. M-Lab
+documents `ndt_intermediate` as an unstable intermediate schema, so future schema changes
+can require updating the `_internal202402` raw-field path.
 
 ## Reproducibility Note
 

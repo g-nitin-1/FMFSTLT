@@ -7,23 +7,6 @@
 -- 3. later rebuild throughput-derived per-window features from raw ndt7 measurements
 
 CREATE OR REPLACE TABLE `ee-21cs01007.fmfstlt.paper_exact_base_meta` AS
-WITH sampled_days AS (
-  SELECT sample_date
-  FROM UNNEST([
-    DATE '2024-04-23',
-    DATE '2024-05-30',
-    DATE '2024-06-16',
-    DATE '2024-07-28',
-    DATE '2024-08-06',
-    DATE '2024-09-26',
-    DATE '2024-10-06',
-    DATE '2024-11-16',
-    DATE '2024-12-14',
-    DATE '2025-01-03',
-    DATE '2025-02-06',
-    DATE '2025-03-04'
-  ]) AS sample_date
-)
 SELECT
   t.date,
   t.id AS uuid,
@@ -44,10 +27,13 @@ SELECT
 FROM `measurement-lab.ndt_intermediate.extended_ndt7_downloads` AS t
 WHERE client.Geo.CountryCode = 'US'
   AND t.date IN (
-    '2024-04-23', '2024-05-30', '2024-06-16', '2024-07-28',
-    '2024-08-06', '2024-09-26', '2024-10-06', '2024-11-16',
-    '2024-12-14', '2025-01-03', '2025-02-06', '2025-03-04'
+    DATE '2024-04-23', DATE '2024-05-30', DATE '2024-06-16',
+    DATE '2024-07-28', DATE '2024-08-06', DATE '2024-09-26',
+    DATE '2024-10-06', DATE '2024-11-16', DATE '2024-12-14',
+    DATE '2025-01-03', DATE '2025-02-06', DATE '2025-03-04'
   )
+  AND t.id IS NOT NULL
+  AND t.a.MeanThroughputMbps IS NOT NULL
   AND LOWER(t.a.CongestionControl) = 'bbr'
   AND filter.IsComplete
   AND filter.IsProduction

@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-QUERY_PROJECT_ID="${QUERY_PROJECT_ID:-${PROJECT_ID:-ee-21cs01007}}"
-SOURCE_PROJECT_ID="${SOURCE_PROJECT_ID:-ee-21cs01007}"
+QUERY_PROJECT_ID="${QUERY_PROJECT_ID:-${PROJECT_ID:-}}"
+SOURCE_PROJECT_ID="${SOURCE_PROJECT_ID:-$QUERY_PROJECT_ID}"
 DATASET="${DATASET:-fmfstlt}"
 GCS_BUCKET="${GCS_BUCKET:-}"
 GCS_PREFIX="${GCS_PREFIX:-fmfstlt_exact_public}"
+
+if [[ -z "$QUERY_PROJECT_ID" ]]; then
+  echo "set PROJECT_ID or QUERY_PROJECT_ID before exporting BigQuery tables" >&2
+  exit 1
+fi
 
 if [[ -z "$GCS_BUCKET" ]]; then
   echo "set GCS_BUCKET, for example: export GCS_BUCKET=my-bucket-name" >&2

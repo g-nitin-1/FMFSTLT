@@ -135,7 +135,8 @@ torch.Size([2, 4])
 
 ## Reproduction Workflow
 
-After exporting the M-Lab tables described in [Data Pipeline](docs/data_pipeline.md):
+Build and export the M-Lab BigQuery tables as described in
+[Data Pipeline](docs/data_pipeline.md), then run:
 
 ```bash
 python -m scripts.build_exact_public_shards

@@ -45,7 +45,9 @@ ranked AS (
     *,
     ROW_NUMBER() OVER (
       PARTITION BY speed_tier
-      ORDER BY FARM_FINGERPRINT(CONCAT(uuid, '|paper_exact_train_v1'))
+      ORDER BY
+        FARM_FINGERPRINT(CONCAT(uuid, '|paper_exact_train_v1')),
+        uuid
     ) AS rn
   FROM train_pool
 )
@@ -100,7 +102,9 @@ ranked AS (
   SELECT
     *,
     ROW_NUMBER() OVER (
-      ORDER BY FARM_FINGERPRINT(CONCAT(uuid, '|paper_exact_test_v1'))
+      ORDER BY
+        FARM_FINGERPRINT(CONCAT(uuid, '|paper_exact_test_v1')),
+        uuid
     ) AS rn
   FROM remaining
 )
@@ -148,7 +152,9 @@ ranked AS (
   SELECT
     *,
     ROW_NUMBER() OVER (
-      ORDER BY FARM_FINGERPRINT(CONCAT(uuid, '|paper_exact_robust_v1'))
+      ORDER BY
+        FARM_FINGERPRINT(CONCAT(uuid, '|paper_exact_robust_v1')),
+        uuid
     ) AS rn
   FROM robust_pool
 )

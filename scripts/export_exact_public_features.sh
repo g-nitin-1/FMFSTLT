@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-QUERY_PROJECT_ID="${QUERY_PROJECT_ID:-${PROJECT_ID:-ee-21cs01007}}"
-SOURCE_PROJECT_ID="${SOURCE_PROJECT_ID:-ee-21cs01007}"
+QUERY_PROJECT_ID="${QUERY_PROJECT_ID:-${PROJECT_ID:-}}"
+SOURCE_PROJECT_ID="${SOURCE_PROJECT_ID:-$QUERY_PROJECT_ID}"
 DATASET="${DATASET:-fmfstlt}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXPORT_ROOT="${EXPORT_ROOT:-$ROOT_DIR/exports_exact_public}"
 ROW_HEADROOM="${ROW_HEADROOM:-5000}"
+
+if [[ -z "$QUERY_PROJECT_ID" ]]; then
+  echo "set PROJECT_ID or QUERY_PROJECT_ID before exporting BigQuery tables" >&2
+  exit 1
+fi
 
 TRAIN_TEST_DATES=(
   2024-04-23

@@ -1,8 +1,8 @@
-DECLARE SOURCE_META_TABLE STRING DEFAULT 'ee-21cs01007.fmfstlt.paper_exact_test_40k_meta';
-DECLARE TARGET_TABLE STRING DEFAULT 'ee-21cs01007.fmfstlt.paper_exact_test_features_100ms_public';
+-- Canonical test feature-table build. Run after 01 and 02.
+-- scripts/build_exact_public_bigquery.sh replaces the default project/dataset
+-- identifiers for portable execution.
 
-EXECUTE IMMEDIATE FORMAT("""
-CREATE OR REPLACE TABLE `%s` AS
+CREATE OR REPLACE TABLE `ee-21cs01007.fmfstlt.paper_exact_test_features_100ms_public` AS
 WITH raw_measurements AS (
   SELECT
     m.date,
@@ -19,7 +19,7 @@ WITH raw_measurements AS (
     sm.TCPInfo.TotalRetrans AS total_retrans,
     sm.TCPInfo.DSackDups AS dsack_dups,
     sm.BBRInfo.BW AS bbr_bw
-  FROM `%s` AS m
+  FROM `ee-21cs01007.fmfstlt.paper_exact_test_40k_meta` AS m
   JOIN `measurement-lab.ndt_intermediate.extended_ndt7_downloads` AS t
     ON t.id = m.uuid
    AND t.date = m.date,
@@ -145,4 +145,4 @@ SELECT
   mean_dsack_dups,
   std_dsack_dups
 FROM bucketed
-""", TARGET_TABLE, SOURCE_META_TABLE);
+;

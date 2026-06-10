@@ -28,5 +28,8 @@ jobs:
       - name: Check formatting
         run: python -m ruff format --check fmfstlt scripts tests
 
+      - name: Check shell scripts
+        run: bash -n scripts/*.sh
+
       - name: Test
         run: python -m pytest -p no:cacheprovider
